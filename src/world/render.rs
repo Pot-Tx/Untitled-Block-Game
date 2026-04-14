@@ -315,7 +315,7 @@ impl System for WorldRenderer {
 
     fn operate(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        _: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         let canvas = render::registries::canvas();

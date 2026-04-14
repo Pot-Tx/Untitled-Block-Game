@@ -293,7 +293,7 @@ impl ErasedDenseMap {
     #[inline]
     pub fn get<T>(&self, id: Id) -> Option<&T> {
         match self.ids.find(id) {
-            Some(idx) => Some(&self.items.get(id as usize)),
+            Some(_) => Some(&self.items.get(id as usize)),
             None => None,
         }
     }

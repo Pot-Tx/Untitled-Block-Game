@@ -449,7 +449,7 @@ impl<G: Generate> Region<G> {
 
     pub fn update(&mut self, context: &RegionContext<G>, threads: &ThreadPool) -> bool {
         match &mut self.mode {
-            RegionMode::Near(mode) => {
+            RegionMode::Near(_) => {
                 if context.depths.is_none() {
                     false
                 } else {

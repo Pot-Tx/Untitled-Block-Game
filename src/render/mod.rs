@@ -313,7 +313,7 @@ impl System for RenderStarter {
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
+        _: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
         let mut canvas = registries::canvas().write().unwrap();
         canvas.begin();
@@ -329,7 +329,7 @@ impl System for RenderFinisher {
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
+        _: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
         let mut canvas = registries::canvas().write().unwrap();
         canvas.end();

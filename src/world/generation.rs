@@ -2,7 +2,7 @@ use crate::util::Id;
 use crate::world::block::Meta;
 use crate::world::region::*;
 use crate::world::BlockPos;
-use glam::{DVec3, IVec3, U8Vec3};
+use glam::IVec3;
 use noise::{NoiseFn, Perlin};
 use rayon::prelude::*;
 use std::array;
@@ -56,8 +56,12 @@ impl Generate for TestGen {
                 let abz = origin.z + z as i32;
                 let aby = (self.perlin.get([abx as f64 / 32.0, abz as f64 / 32.0]) * 32.0) as i32;
                 let y = (aby - origin.y).clamp(0, (size - 1) as i32) as u8;
-                
-                chunk.fill(RelBlockPos::new(x, 0, z), RelBlockPos::new(x + 1, y + 1, z + 1), 1);
+
+                chunk.fill(
+                    RelBlockPos::new(x, 0, z),
+                    RelBlockPos::new(x + 1, y + 1, z + 1),
+                    1,
+                );
             }
         }
 

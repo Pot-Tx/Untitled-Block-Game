@@ -1,0 +1,24 @@
+[package]
+name = "block_game"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "core"
+
+[dependencies]
+wgpu = "29.0.1"
+winit = "0.30.12"
+crossbeam-channel = "0.5.15"
+bytemuck = "1.24.0"
+image = { version = "0.25.9", default-features = false, features = ["png"] }
+rayon = "1.11.0"
+pollster = "0.4.0"
+glam = { version = "0.32.0", features = ["bytemuck"] }
+num-traits = "0.2.19"
+noise = "0.9.0"
+anyhow = "1.0.102"
+bitflags = "2.11.0"
+smallvec = "1.15.1"
+log = "0.4.29"
+env_logger = "0.11.8"

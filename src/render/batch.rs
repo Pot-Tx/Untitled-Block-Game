@@ -1,326 +1,328 @@
-use crate::render::config::RenderPipelineConfig;
 use crate::render::*;
 use glam::u32;
+use std::fs;
 use std::marker::PhantomData;
-use wgpu::CurrentSurfaceTexture::Success;
-
-pub mod registries {
-    use crate::render::*;
-    use crate::util::collection::Registry;
-    use crate::world;
-    use log::error;
-    use std::sync::OnceLock;
-    use wgpu::{AddressMode, MipmapFilterMode, ShaderStages};
-    
-    static CANVAS: OnceLock<RwLock<Canvas>> = OnceLock::new();
-    static BINDINGS: OnceLock<Registry<Binding>> = OnceLock::new();
-
-    pub fn set_canvas(canvas: Canvas) {
-        if CANVAS.set(RwLock::new(canvas)).is_err() {
-            error!("Canvas already initialized");
-        }
-    }
-
-    pub fn set_bindings(bindings: Registry<Binding>) {
-        if BINDINGS.set(bindings).is_err() {
-            error!("Bindings already initialized");
-        }
-    }
-
-    #[inline]
-    pub fn canvas() -> &'static RwLock<Canvas> {
-        CANVAS
-            .get()
-            .expect("Failed to get Canvas. Make sure to call registries::set_canvas first!")
-    }
-
-    #[inline]
-    pub fn bindings() -> &'static Registry<Binding> {
-        BINDINGS
-            .get()
-            .expect("Failed to get Bindings. Make sure to call registries::set_bindings first!")
-    }
-}
 
 pub struct RenderBatch<'a, V: Vertex, I: Inst> {
-    render_pipeline: RenderPipeline,
-    bindings: Vec<&'a Binding>,
-    _v_marker: PhantomData<V>,
-    _i_marker: PhantomData<I>,
+	pipeline: RenderPipeline,
+	bind_groups: Vec<Option<&'a BindGroup>>,
+	_v_marker: PhantomData<V>,
+	_i_marker: PhantomData<I>,
 }
 
 pub struct RenderBatchDescriptor<'a> {
-    pub name: &'a str,
-    pub bindings: Vec<&'a Binding>,
-    pub shader_name: &'a str,
-    pub translucent: bool,
-    pub topology: PrimitiveTopology,
-    pub depth_write: bool,
+	pub name: &'a str,
+	pub bindings: Vec<Option<&'a Binding>>,
+	pub shader_name: &'a str,
+	pub translucent: bool,
+	pub topology: PrimitiveTopology,
+	pub depth_write: bool,
 }
 
 pub struct ComputeBatch<'a> {
-    compute_pipeline: ComputePipeline,
-    bindings: Vec<&'a Binding>,
+	pipeline: ComputePipeline,
+	bind_groups: Vec<Option<&'a BindGroup>>,
 }
 
 pub struct ComputeBatchDescriptor<'a> {
-    pub name: &'a str,
-    pub bindings: Vec<&'a Binding>,
-    pub shader_name: &'a str,
+	pub name: &'a str,
+	pub bindings: Vec<Option<&'a Binding>>,
+	pub shader_name: &'a str,
 }
 
-#[derive(Debug)]
 pub struct Binding {
-    pub index: u32,
-    pub bind_group: BindGroup,
-    pub layout: BindGroupLayout,
+	pub index: u32,
+	pub layout: BindGroupLayout,
+	pub bind_group: BindGroup,
 }
 
 pub struct BindingDescriptor<'a> {
-    pub index: u32,
-    pub name: &'a str,
-    pub items: Vec<(ShaderStages, BindGroupEntryConfig<'a>)>,
+	pub index: u32,
+	pub name: &'a str,
+	pub entries: Vec<BindingEntryDescriptor<'a>>,
 }
 
-pub struct Canvas {
-    surface: Surface<'static>,
-    pub surface_config: SurfaceConfiguration,
-    pub device: Device,
-    pub queue: Queue,
-    depth_texture: Texture,
-    pub depth_texture_view: TextureView,
-    surface_texture: Option<SurfaceTexture>,
-    pub texture_view: Option<TextureView>,
-    pub command_encoder: Option<CommandEncoder>,
+pub struct BindingEntryDescriptor<'a> {
+	pub visibility: ShaderStages,
+	pub item: BindingItem<'a>,
 }
 
-unsafe impl Sync for Canvas {}
-unsafe impl Send for Canvas {}
-
-impl Canvas {
-    pub async fn new(window: &Arc<Window>) -> Self {
-        let wgpu_instance = Instance::default();
-        let size = window.inner_size();
-        let width = size.width.max(1);
-        let height = size.height.max(1);
-
-        let surface = wgpu_instance.create_surface(window.clone()).unwrap();
-        let adapter = wgpu_instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::default(),
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .expect("Failed to find adapter");
-        let surface_config = surface.get_default_config(&adapter, width, height).unwrap();
-        let (device, queue) = adapter
-            .request_device(&DeviceDescriptor {
-                label: Label::from("device"),
-                required_features: Features::empty(),
-                required_limits: Limits::default().using_resolution(adapter.limits()),
-                ..Default::default()
-            })
-            .await
-            .expect("Failed to create device");
-        surface.configure(&device, &surface_config);
-        let depth_texture = device.create_texture(&TextureDescriptor {
-            label: Label::from("depth_texture"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Depth32Float,
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let depth_texture_view = depth_texture.create_view(&TextureViewDescriptor::default());
-
-        Self {
-            surface,
-            surface_config,
-            device,
-            queue,
-            depth_texture,
-            depth_texture_view,
-            surface_texture: None,
-            texture_view: None,
-            command_encoder: None,
-        }
-    }
-
-    pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        let width = size.width.max(1);
-        let height = size.height.max(1);
-
-        self.surface_config.width = width;
-        self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
-
-        self.depth_texture = self.device.create_texture(&TextureDescriptor {
-            label: Label::from("depth_texture"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Depth32Float,
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        self.depth_texture_view = self
-            .depth_texture
-            .create_view(&TextureViewDescriptor::default());
-    }
-
-    pub fn begin(&mut self) {
-        if let Success(surface_texture) = self.surface.get_current_texture() {
-            self.texture_view = Some(
-                surface_texture
-                    .texture
-                    .create_view(&TextureViewDescriptor::default()),
-            );
-            self.surface_texture = Some(surface_texture);
-            self.command_encoder = Some(self.device.create_command_encoder(
-                &CommandEncoderDescriptor {
-                    label: Label::from("command_encoder"),
-                },
-            ));
-        } else {
-            panic!("Failed to get next surface texture");
-        }
-    }
-
-    pub fn end(&mut self) {
-        if let Some(surface_texture) = self.surface_texture.take()
-            && let Some(_) = self.texture_view.take()
-            && let Some(command_encoder) = self.command_encoder.take()
-        {
-            self.queue.submit(Some(command_encoder.finish()));
-            surface_texture.present();
-        } else {
-            panic!("Failed to render on Canvas. Make sure to call Canvas::begin first!");
-        }
-    }
+pub enum BindingItem<'a> {
+	TextureView(
+		&'a TextureView,
+		TextureViewDimension,
+		Option<StorageTextureAccess>,
+	),
+	Sampler(&'a Sampler),
+	Buffer(&'a Buffer, BufferBindingType),
 }
-
-impl Resource for Registry<Binding> {}
 
 impl Binding {
-    pub fn new(canvas: &Canvas, desc: BindingDescriptor) -> Self {
-        let index = desc.index;
-        let config = BindGroupConfig {
-            name: desc.name,
-            items: desc.items,
-        };
-        let bind_group = config.create(canvas);
-        let layout = config.layout(canvas);
-
-        Binding {
-            index,
-            bind_group,
-            layout,
-        }
-    }
+	pub fn new(canvas: &Canvas, desc: &BindingDescriptor) -> Self {
+		let device = &canvas.device;
+		
+		let mut layouts = Vec::new();
+		let mut entries = Vec::new();
+		
+		desc.entries.iter().enumerate().for_each(|(i, entry)| {
+			let (ty, resource) = match entry.item {
+				BindingItem::Sampler(sampler) => (
+					BindingType::Sampler(SamplerBindingType::Filtering),
+					BindingResource::Sampler(sampler),
+				),
+				
+				BindingItem::TextureView(view, dim, access) => (
+					match access {
+						Some(access) => BindingType::StorageTexture {
+							access,
+							format: TextureFormat::Rgba8Unorm,
+							view_dimension: dim,
+						},
+						
+						None => BindingType::Texture {
+							multisampled: false,
+							view_dimension: dim,
+							sample_type: TextureSampleType::Float { filterable: true },
+						},
+					},
+					BindingResource::TextureView(view),
+				),
+				
+				BindingItem::Buffer(buffer, ty) => (
+					BindingType::Buffer {
+						ty,
+						has_dynamic_offset: false,
+						min_binding_size: BufferSize::new(buffer.size()),
+					},
+					buffer.as_entire_binding()
+				)
+			};
+			
+			layouts.push(BindGroupLayoutEntry {
+				binding: i as u32,
+				visibility: entry.visibility,
+				ty,
+				count: None,
+			});
+			
+			entries.push(BindGroupEntry {
+				binding: i as u32,
+				resource,
+			});
+		});
+		
+		let layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+			label: Label::from(format!("{}_bind_group_layout", desc.name).as_str()),
+			entries: &layouts,
+		});
+		
+		let bind_group = device.create_bind_group(&BindGroupDescriptor {
+			label: Label::from(format!("{}_bind_group", desc.name).as_str()),
+			layout: &layout,
+			entries: &entries,
+		});
+		
+		Binding {
+			index: desc.index,
+			layout,
+			bind_group,
+		}
+	}
 }
 
 impl<'a, V: Vertex, I: Inst> RenderBatch<'a, V, I> {
-    pub fn new(canvas: &Canvas, desc: RenderBatchDescriptor<'a>) -> Self {
-        let layouts = desc
-            .bindings
-            .iter()
-            .enumerate()
-            .map(|(idx, &binding)| {
-                assert_eq!(idx as u32, binding.index);
-                &binding.layout
-            })
-            .collect();
-
-        let config = RenderPipelineConfig {
-            name: desc.name,
-            bind_group_layouts: layouts,
-            shader_name: desc.shader_name,
-            translucent: desc.translucent,
-            vertex_buffer_layouts: &[V::layout(), I::layout::<V>()],
-            topology: desc.topology,
-            depth_write: desc.depth_write,
-        };
-        let render_pipeline = config.create(canvas);
-
-        Self {
-            render_pipeline,
-            bindings: desc.bindings,
-            _v_marker: PhantomData,
-            _i_marker: PhantomData,
-        }
-    }
-
-    pub fn begin(&mut self, render_pass: &mut RenderPass) {
-        render_pass.set_pipeline(&self.render_pipeline);
-
-        for &binding in self.bindings.iter() {
-            render_pass.set_bind_group(binding.index, &binding.bind_group, &[]);
-        }
-    }
-
-    pub fn draw(&mut self, render_pass: &mut RenderPass, item: &impl Render<V, I>) {
-        let items = item.rendered();
-
-        for item in items {
-            render_pass.set_vertex_buffer(0, item.geometry.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(item.geometry.index_buffer.slice(..), IndexFormat::Uint16);
-            render_pass.set_vertex_buffer(1, item.instances.instance_buffer.slice(..));
-
-            render_pass.draw_indexed(
-                0..item.geometry.index_count,
-                0,
-                0..item.instances.instance_count,
-            );
-        }
-    }
+	pub fn new(canvas: &Canvas, desc: RenderBatchDescriptor<'a>) -> Self {
+		let device = &canvas.device;
+		let surface_config = &canvas.surface_config;
+		
+		let mut layouts = Vec::new();
+		let mut bind_groups = Vec::new();
+		
+		desc
+			.bindings
+			.iter()
+			.enumerate()
+			.for_each(|(i, &binding)| {
+				let (layout, bind_group) = match binding {
+					Some(b) => {
+						assert_eq!(i as u32, b.index);
+						(Some(&b.layout), Some(&b.bind_group))
+					}
+					None => (None, None)
+				};
+				
+				layouts.push(layout);
+				bind_groups.push(bind_group);
+			});
+		
+		let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+			label: Label::from(format!("{}_pipeline_layout", desc.name).as_str()),
+			bind_group_layouts: &layouts,
+			immediate_size: 0,
+		});
+		
+		let shader_src =
+			fs::read_to_string(format!("assets/shaders/{}.wgsl", desc.shader_name)).expect(
+				&format!("Failed to read shader file {}.wgsl", desc.shader_name),
+			);
+		let shader_module = device.create_shader_module(ShaderModuleDescriptor {
+			label: Label::from(format!("{}_shader", desc.shader_name).as_str()),
+			source: ShaderSource::Wgsl(shader_src.into()),
+		});
+		
+		let targets = match desc.translucent {
+			false => [Some(surface_config.format.into())],
+			
+			true => [Some(ColorTargetState {
+				format: surface_config.format,
+				blend: Some(BlendState {
+					color: BlendComponent {
+						src_factor: BlendFactor::SrcAlpha,
+						dst_factor: BlendFactor::OneMinusSrcAlpha,
+						operation: BlendOperation::Add,
+					},
+					alpha: BlendComponent {
+						src_factor: BlendFactor::One,
+						dst_factor: BlendFactor::Zero,
+						operation: BlendOperation::Add,
+					},
+				}),
+				write_mask: ColorWrites::ALL,
+			})],
+		};
+		
+		let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+			label: Label::from(format!("{}_pipeline", desc.name).as_str()),
+			layout: Some(&layout),
+			vertex: VertexState {
+				module: &shader_module,
+				entry_point: Some("vs_main"),
+				buffers: &[V::LAYOUT, I::layout::<V>()],
+				compilation_options: PipelineCompilationOptions::default(),
+			},
+			fragment: Some(FragmentState {
+				module: &shader_module,
+				entry_point: Some("fs_main"),
+				compilation_options: PipelineCompilationOptions::default(),
+				targets: &targets,
+			}),
+			primitive: PrimitiveState {
+				topology: desc.topology,
+				strip_index_format: None,
+				front_face: FrontFace::Ccw,
+				cull_mode: Some(Face::Back),
+				unclipped_depth: false,
+				polygon_mode: PolygonMode::default(),
+				conservative: false,
+			},
+			depth_stencil: Some(DepthStencilState {
+				format: TextureFormat::Depth32Float,
+				depth_write_enabled: Some(desc.depth_write),
+				depth_compare: Some(CompareFunction::Greater),
+				stencil: StencilState::default(),
+				bias: DepthBiasState::default(),
+			}),
+			multisample: MultisampleState::default(),
+			multiview_mask: None,
+			cache: None,
+		});
+		
+		Self {
+			pipeline,
+			bind_groups,
+			_v_marker: PhantomData,
+			_i_marker: PhantomData,
+		}
+	}
+	
+	pub fn begin(&self, render_pass: &mut RenderPass) {
+		render_pass.set_pipeline(&self.pipeline);
+		
+		for (idx, &bind_group) in self.bind_groups.iter().enumerate() {
+			render_pass.set_bind_group(idx as u32, bind_group, &[]);
+		}
+	}
+	
+	pub fn draw(&self, render_pass: &mut RenderPass, item: &impl Render<V, I>) {
+		let items = item.rendered();
+		
+		for item in items {
+			render_pass.set_vertex_buffer(0, item.geometry.vertex_buffer.slice(..));
+			render_pass.set_index_buffer(item.geometry.index_buffer.slice(..), IndexFormat::Uint16);
+			render_pass.set_vertex_buffer(1, item.instances.instance_buffer.slice(..));
+			
+			render_pass.draw_indexed(
+				0..item.geometry.index_count,
+				0,
+				0..item.instances.instance_count,
+			);
+		}
+	}
 }
 
 impl<'a> ComputeBatch<'a> {
-    pub fn new(canvas: &Canvas, desc: ComputeBatchDescriptor<'a>) -> Self {
-        let layouts = desc
-            .bindings
-            .iter()
-            .enumerate()
-            .map(|(idx, &binding)| {
-                assert_eq!(idx as u32, binding.index);
-                &binding.layout
-            })
-            .collect();
-
-        let config = ComputePipelineConfig {
-            name: desc.name,
-            bind_group_layouts: layouts,
-            shader_name: desc.shader_name,
-        };
-        let compute_pipeline = config.create(canvas);
-
-        Self {
-            compute_pipeline,
-            bindings: desc.bindings,
-        }
-    }
-
-    pub fn begin(&mut self, compute_pass: &mut ComputePass) {
-        compute_pass.set_pipeline(&self.compute_pipeline);
-
-        for &binding in self.bindings.iter() {
-            compute_pass.set_bind_group(binding.index, &binding.bind_group, &[]);
-        }
-    }
-
-    pub fn dispatch(&self, compute_pass: &mut ComputePass, x: u32, y: u32, z: u32) {
-        compute_pass.dispatch_workgroups(x, y, z);
-    }
+	pub fn new(canvas: &Canvas, desc: ComputeBatchDescriptor<'a>) -> Self {
+		let device = &canvas.device;
+		
+		let mut layouts = Vec::new();
+		let mut bind_groups = Vec::new();
+		
+		desc
+			.bindings
+			.iter()
+			.enumerate()
+			.for_each(|(i, &binding)| {
+				let (layout, bind_group) = match binding {
+					Some(b) => {
+						assert_eq!(i as u32, b.index);
+						(Some(&b.layout), Some(&b.bind_group))
+					}
+					None => (None, None)
+				};
+				
+				layouts.push(layout);
+				bind_groups.push(bind_group);
+			});
+		
+		let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+			label: Label::from(format!("{}_pipeline_layout", desc.name).as_str()),
+			bind_group_layouts: &layouts,
+			immediate_size: 0,
+		});
+		
+		let shader_src =
+			fs::read_to_string(format!("assets/shaders/{}.wgsl", desc.shader_name)).expect(
+				&format!("Failed to read shader file {}.wgsl", desc.shader_name),
+			);
+		let shader_module = device.create_shader_module(ShaderModuleDescriptor {
+			label: Label::from(format!("{}_shader", desc.shader_name).as_str()),
+			source: ShaderSource::Wgsl(shader_src.into()),
+		});
+		
+		let pipeline = device.create_compute_pipeline(&ComputePipelineDescriptor {
+			label: Label::from(format!("{}_pipeline", desc.name).as_str()),
+			layout: Some(&layout),
+			module: &shader_module,
+			entry_point: Some("cs_main"),
+			compilation_options: PipelineCompilationOptions::default(),
+			cache: None,
+		});
+		
+		Self {
+			pipeline,
+			bind_groups,
+		}
+	}
+	
+	pub fn begin(&self, compute_pass: &mut ComputePass) {
+		compute_pass.set_pipeline(&self.pipeline);
+		
+		for (idx, &bind_group) in self.bind_groups.iter().enumerate() {
+			compute_pass.set_bind_group(idx as u32, bind_group, &[]);
+		}
+	}
+	
+	pub fn dispatch(&self, compute_pass: &mut ComputePass, x: u32, y: u32, z: u32) {
+		compute_pass.dispatch_workgroups(x, y, z);
+	}
 }

@@ -21,7 +21,7 @@ pub enum Direction {
 }
 
 impl Axis {
-    pub const ALL: &'static [Self] = &[Self::X, Self::Y, Self::Z];
+    pub const ALL: &'static [Self; 3] = &[Self::X, Self::Y, Self::Z];
 
     #[inline]
     pub const fn by_idx(idx: usize) -> Self {
@@ -75,7 +75,7 @@ impl Axis {
 }
 
 impl Direction {
-    pub const ALL: &'static [Self] = &[
+    pub const ALL: &'static [Self; 6] = &[
         Self::West,
         Self::East,
         Self::Down,

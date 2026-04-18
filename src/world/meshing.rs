@@ -57,12 +57,30 @@ pub struct MergeSpan {
 
 impl BlockMeshTemplate {
     pub fn cuboid(min: Vec3, max: Vec3, translucent: [bool; 6]) -> [Self; 6] {
-        let uvs = array::from_fn(|_| {
+        let uvs = Direction::ALL.map(|dir| {
+            let (udir, vdir) = match dir {
+                Direction::West => (Direction::South, Direction::Down),
+                Direction::East => (Direction::North, Direction::Down),
+                Direction::Down => (Direction::North, Direction::West),
+                Direction::Up => (Direction::South, Direction::East),
+                Direction::North => (Direction::West, Direction::Down),
+                Direction::South => (Direction::East, Direction::Down),
+            };
+            
+            let (umin, umax) = match udir.positive() {
+                false => (1.0 - max.get(udir.axis()), 1.0 - min.get(udir.axis())),
+                true => (min.get(udir.axis()), max.get(udir.axis())),
+            };
+            let (vmin, vmax) = match vdir.positive() {
+                false => (1.0 - max.get(vdir.axis()), 1.0 - min.get(vdir.axis())),
+                true => (min.get(vdir.axis()), max.get(vdir.axis())),
+            };
+            
             vec![
-                Vec2::new(0.0, 0.0),
-                Vec2::new(0.0, 1.0),
-                Vec2::new(1.0, 1.0),
-                Vec2::new(1.0, 0.0),
+                Vec2::new(umin, vmin),
+                Vec2::new(umin, vmax),
+                Vec2::new(umax, vmax),
+                Vec2::new(umax, vmin),
             ]
         });
 

@@ -5,217 +5,217 @@ use std::ops::*;
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum Axis {
-	X,
-	Y,
-	Z,
+    X,
+    Y,
+    Z,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
 pub enum Direction {
-	West,
-	East,
-	Down,
-	Up,
-	North,
-	South,
+    West,
+    East,
+    Down,
+    Up,
+    North,
+    South,
 }
 
 impl Axis {
-	pub const ALL: &'static [Self] = &[Self::X, Self::Y, Self::Z];
-	
-	#[inline]
-	pub const fn by_idx(idx: usize) -> Self {
-		Self::ALL[idx]
-	}
-	
-	#[inline]
-	pub const fn idx(&self) -> usize {
-		match self {
-			Self::X => 0,
-			Self::Y => 1,
-			Self::Z => 2,
-		}
-	}
-	
-	#[inline]
-	pub const fn others(&self) -> &[Self] {
-		match self {
-			Self::X => &[Self::Y, Self::Z],
-			Self::Y => &[Self::Z, Self::X],
-			Self::Z => &[Self::X, Self::Y],
-		}
-	}
-	
-	#[inline]
-	pub const fn direction(&self, positive: bool) -> Direction {
-		match self {
-			Self::X => {
-				if positive {
-					Direction::East
-				} else {
-					Direction::West
-				}
-			}
-			Self::Y => {
-				if positive {
-					Direction::Up
-				} else {
-					Direction::Down
-				}
-			}
-			Self::Z => {
-				if positive {
-					Direction::South
-				} else {
-					Direction::North
-				}
-			}
-		}
-	}
+    pub const ALL: &'static [Self] = &[Self::X, Self::Y, Self::Z];
+
+    #[inline]
+    pub const fn by_idx(idx: usize) -> Self {
+        Self::ALL[idx]
+    }
+
+    #[inline]
+    pub const fn idx(&self) -> usize {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+
+    #[inline]
+    pub const fn others(&self) -> &[Self] {
+        match self {
+            Self::X => &[Self::Y, Self::Z],
+            Self::Y => &[Self::Z, Self::X],
+            Self::Z => &[Self::X, Self::Y],
+        }
+    }
+
+    #[inline]
+    pub const fn direction(&self, positive: bool) -> Direction {
+        match self {
+            Self::X => {
+                if positive {
+                    Direction::East
+                } else {
+                    Direction::West
+                }
+            }
+            Self::Y => {
+                if positive {
+                    Direction::Up
+                } else {
+                    Direction::Down
+                }
+            }
+            Self::Z => {
+                if positive {
+                    Direction::South
+                } else {
+                    Direction::North
+                }
+            }
+        }
+    }
 }
 
 impl Direction {
-	pub const ALL: &'static [Self] = &[
-		Self::West,
-		Self::East,
-		Self::Down,
-		Self::Up,
-		Self::North,
-		Self::South,
-	];
-	
-	#[inline]
-	pub const fn by_idx(idx: usize) -> Self {
-		Self::ALL[idx]
-	}
-	
-	#[inline]
-	pub const fn idx(&self) -> usize {
-		match self {
-			Self::West => 0,
-			Self::East => 1,
-			Self::Down => 2,
-			Self::Up => 3,
-			Self::North => 4,
-			Self::South => 5,
-		}
-	}
-	
-	#[inline]
-	pub const fn plane(&self) -> &[Self] {
-		match self {
-			Self::West | Self::East => &[Self::Down, Self::Up, Self::North, Self::South],
-			Self::Down | Self::Up => &[Self::North, Self::South, Self::West, Self::East],
-			Self::North | Self::South => &[Self::West, Self::East, Self::Down, Self::Up],
-		}
-	}
-	
-	#[inline]
-	pub const fn axis(&self) -> Axis {
-		match self {
-			Self::West | Self::East => Axis::X,
-			Self::Down | Self::Up => Axis::Y,
-			Self::North | Self::South => Axis::Z,
-		}
-	}
-	
-	#[inline]
-	pub const fn positive(&self) -> bool {
-		match self {
-			Self::East | Self::Up | Self::South => true,
-			Self::West | Self::Down | Self::North => false,
-		}
-	}
-	
-	#[inline]
-	pub const fn opposite(&self) -> Self {
-		match self {
-			Self::West => Self::East,
-			Self::East => Self::West,
-			Self::Down => Self::Up,
-			Self::Up => Self::Down,
-			Self::North => Self::South,
-			Self::South => Self::North,
-		}
-	}
-	
-	#[inline]
-	pub fn vector<C: Coord3>(&self) -> C
-	where
-		<C as Coord>::Scalar: Copy + Clone + Signed,
-	{
-		let zero = C::Scalar::zero();
-		let one = C::Scalar::one();
-		match self {
-			Self::West => C::new(-one, zero, zero),
-			Self::East => C::new(one, zero, zero),
-			Self::Down => C::new(zero, -one, zero),
-			Self::Up => C::new(zero, one, zero),
-			Self::North => C::new(zero, zero, -one),
-			Self::South => C::new(zero, zero, one),
-		}
-	}
+    pub const ALL: &'static [Self] = &[
+        Self::West,
+        Self::East,
+        Self::Down,
+        Self::Up,
+        Self::North,
+        Self::South,
+    ];
+
+    #[inline]
+    pub const fn by_idx(idx: usize) -> Self {
+        Self::ALL[idx]
+    }
+
+    #[inline]
+    pub const fn idx(&self) -> usize {
+        match self {
+            Self::West => 0,
+            Self::East => 1,
+            Self::Down => 2,
+            Self::Up => 3,
+            Self::North => 4,
+            Self::South => 5,
+        }
+    }
+
+    #[inline]
+    pub const fn plane(&self) -> &[Self] {
+        match self {
+            Self::West | Self::East => &[Self::Down, Self::Up, Self::North, Self::South],
+            Self::Down | Self::Up => &[Self::North, Self::South, Self::West, Self::East],
+            Self::North | Self::South => &[Self::West, Self::East, Self::Down, Self::Up],
+        }
+    }
+
+    #[inline]
+    pub const fn axis(&self) -> Axis {
+        match self {
+            Self::West | Self::East => Axis::X,
+            Self::Down | Self::Up => Axis::Y,
+            Self::North | Self::South => Axis::Z,
+        }
+    }
+
+    #[inline]
+    pub const fn positive(&self) -> bool {
+        match self {
+            Self::East | Self::Up | Self::South => true,
+            Self::West | Self::Down | Self::North => false,
+        }
+    }
+
+    #[inline]
+    pub const fn opposite(&self) -> Self {
+        match self {
+            Self::West => Self::East,
+            Self::East => Self::West,
+            Self::Down => Self::Up,
+            Self::Up => Self::Down,
+            Self::North => Self::South,
+            Self::South => Self::North,
+        }
+    }
+
+    #[inline]
+    pub fn vector<C: Coord3>(&self) -> C
+    where
+        <C as Coord>::Scalar: Copy + Clone + Signed,
+    {
+        let zero = C::Scalar::zero();
+        let one = C::Scalar::one();
+        match self {
+            Self::West => C::new(-one, zero, zero),
+            Self::East => C::new(one, zero, zero),
+            Self::Down => C::new(zero, -one, zero),
+            Self::Up => C::new(zero, one, zero),
+            Self::North => C::new(zero, zero, -one),
+            Self::South => C::new(zero, zero, one),
+        }
+    }
 }
 
 pub trait Coord:
-Copy
-+ Clone
-+ Pod
-+ Zeroable
-+ Default
-+ Add<Output = Self>
-+ AddAssign
-+ Sub<Output = Self>
-+ SubAssign
-+ Mul<Self::Scalar, Output = Self>
-+ MulAssign
-+ Div<Self::Scalar, Output = Self>
-+ DivAssign
-+ Index<usize, Output = Self::Scalar>
-+ IndexMut<usize>
+    Copy
+    + Clone
+    + Pod
+    + Zeroable
+    + Default
+    + Add<Output = Self>
+    + AddAssign
+    + Sub<Output = Self>
+    + SubAssign
+    + Mul<Self::Scalar, Output = Self>
+    + MulAssign
+    + Div<Self::Scalar, Output = Self>
+    + DivAssign
+    + Index<usize, Output = Self::Scalar>
+    + IndexMut<usize>
 {
-	type Scalar: Copy
-	+ Clone
-	+ Num
-	+ PartialOrd
-	+ FromPrimitive
-	+ Add<Output = Self::Scalar>
-	+ AddAssign
-	+ Sub<Output = Self::Scalar>
-	+ SubAssign
-	+ Mul<Self::Scalar, Output = Self::Scalar>
-	+ MulAssign
-	+ Div<Self::Scalar, Output = Self::Scalar>
-	+ DivAssign;
-	
-	const DIM: usize;
+    type Scalar: Copy
+        + Clone
+        + Num
+        + PartialOrd
+        + FromPrimitive
+        + Add<Output = Self::Scalar>
+        + AddAssign
+        + Sub<Output = Self::Scalar>
+        + SubAssign
+        + Mul<Self::Scalar, Output = Self::Scalar>
+        + MulAssign
+        + Div<Self::Scalar, Output = Self::Scalar>
+        + DivAssign;
+
+    const DIM: usize;
 }
 
 pub trait Coord3: Coord {
-	#[must_use]
-	fn new(x: Self::Scalar, y: Self::Scalar, z: Self::Scalar) -> Self;
-	
-	fn get(&self, a: Axis) -> Self::Scalar;
-	
-	#[must_use]
-	fn with(self, a: Axis, v: Self::Scalar) -> Self;
-	
-	#[must_use]
-	fn shift(self, a: Axis, v: Self::Scalar) -> Self;
-	
-	#[must_use]
-	fn normalize(self) -> Self;
-	
-	#[must_use]
-	fn dot(self, other: Self) -> Self::Scalar;
-	
-	#[must_use]
-	fn cross(self, other: Self) -> Self;
+    #[must_use]
+    fn new(x: Self::Scalar, y: Self::Scalar, z: Self::Scalar) -> Self;
+
+    fn get(&self, a: Axis) -> Self::Scalar;
+
+    #[must_use]
+    fn with(self, a: Axis, v: Self::Scalar) -> Self;
+
+    #[must_use]
+    fn shift(self, a: Axis, v: Self::Scalar) -> Self;
+
+    #[must_use]
+    fn normalize(self) -> Self;
+
+    #[must_use]
+    fn dot(self, other: Self) -> Self::Scalar;
+
+    #[must_use]
+    fn cross(self, other: Self) -> Self;
 }
 
 pub trait ICoord3: Coord3<Scalar: PrimInt> {
-	#[must_use]
-	fn step(self, d: Direction) -> Self;
+    #[must_use]
+    fn step(self, d: Direction) -> Self;
 }
 
 pub trait SCoord3: Coord3<Scalar: Signed> + Neg<Output = Self> {}
@@ -283,7 +283,7 @@ macro_rules! impl_coord3_for {
                 }
 
                 #[inline]
-                fn normalize(mut self) -> Self {
+                fn normalize(self) -> Self {
                     self.normalize()
                 }
 

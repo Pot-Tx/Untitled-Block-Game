@@ -2,24 +2,24 @@ use glam::*;
 use num_traits::Num;
 
 pub trait Trans {
-	type Scalar: Num;
+    type Scalar: Num;
 }
 
 pub trait Trans3: Trans {
-	fn rotation(yaw: Self::Scalar, pitch: Self::Scalar, roll: Self::Scalar) -> Self;
+    fn rotation(yaw: Self::Scalar, pitch: Self::Scalar, roll: Self::Scalar) -> Self;
 }
 
 pub trait Trans4: Trans {
-	fn translation(x: Self::Scalar, y: Self::Scalar, z: Self::Scalar) -> Self;
-	
-	fn rotation(yaw: Self::Scalar, pitch: Self::Scalar, roll: Self::Scalar) -> Self;
-	
-	fn projection(
-		near: Self::Scalar,
-		far: Self::Scalar,
-		fov: Self::Scalar,
-		aspect: Self::Scalar,
-	) -> Self;
+    fn translation(x: Self::Scalar, y: Self::Scalar, z: Self::Scalar) -> Self;
+
+    fn rotation(yaw: Self::Scalar, pitch: Self::Scalar, roll: Self::Scalar) -> Self;
+
+    fn projection(
+        near: Self::Scalar,
+        far: Self::Scalar,
+        fov: Self::Scalar,
+        aspect: Self::Scalar,
+    ) -> Self;
 }
 
 macro_rules! impl_trans_for {

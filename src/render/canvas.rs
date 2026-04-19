@@ -33,7 +33,6 @@ pub struct Canvas {
 }
 
 unsafe impl Sync for Canvas {}
-unsafe impl Send for Canvas {}
 
 impl Canvas {
     pub async fn new(window: &Arc<Window>) -> Self {

@@ -189,7 +189,22 @@ pub trait Coord:
         + DivAssign;
 
     const DIM: usize;
+    
+    #[must_use]
+    fn min_element(self) -> Self::Scalar;
+    
+    #[must_use]
+    fn max_element(self) -> Self::Scalar;
 }
+
+pub trait SCoord: Coord<Scalar: Signed> + Neg<Output = Self> {}
+
+pub trait FCoord: Coord<Scalar: Float> + SCoord {
+    #[must_use]
+    fn normalize(self) -> Self;
+}
+
+pub trait ICoord: Coord<Scalar: PrimInt> {}
 
 pub trait Coord3: Coord {
     #[must_use]
@@ -204,21 +219,20 @@ pub trait Coord3: Coord {
     fn shift(self, a: Axis, v: Self::Scalar) -> Self;
 
     #[must_use]
-    fn normalize(self) -> Self;
-
-    #[must_use]
     fn dot(self, other: Self) -> Self::Scalar;
 
     #[must_use]
     fn cross(self, other: Self) -> Self;
 }
 
-pub trait ICoord3: Coord3<Scalar: PrimInt> {
+pub trait SCoord3: SCoord + Coord3 {}
+
+pub trait FCoord3: FCoord + Coord3 {}
+
+pub trait ICoord3: ICoord + Coord3 {
     #[must_use]
     fn step(self, d: Direction) -> Self;
 }
-
-pub trait SCoord3: Coord3<Scalar: Signed> + Neg<Output = Self> {}
 
 macro_rules! impl_coord_for {
     ($($vec:ty : $scalar:ty, $dim:expr),* $(,)?) => {
@@ -226,6 +240,16 @@ macro_rules! impl_coord_for {
             impl Coord for $vec {
                 type Scalar = $scalar;
                 const DIM: usize = $dim;
+                
+                #[inline]
+                fn min_element(self) -> Self::Scalar {
+                    self.min_element()
+                }
+                
+                #[inline]
+                fn max_element(self) -> Self::Scalar {
+                    self.max_element()
+                }
             }
         )*
     };
@@ -243,6 +267,25 @@ impl_coord_for!(I64Vec2: i64, 2, I64Vec3: i64, 3, I64Vec4: i64, 4);
 impl_coord_for!(U64Vec2: u64, 2, U64Vec3: u64, 3, U64Vec4: u64, 4);
 impl_coord_for!(ISizeVec2: isize, 2, ISizeVec3: isize, 3, ISizeVec4: isize, 4);
 impl_coord_for!(USizeVec2: usize, 2, USizeVec3: usize, 3, USizeVec4: usize, 4);
+
+impl<C: Coord<Scalar: Signed> + Neg<Output = C>> SCoord for C {}
+
+macro_rules! impl_fcoord_for {
+    ($($vec:ty),*) => {
+        $(
+            impl FCoord for $vec {
+                #[inline]
+                fn normalize(self) -> Self {
+                    self.normalize()
+                }
+            }
+        )*
+    };
+}
+
+impl_fcoord_for!(Vec2, Vec3, Vec3A, Vec4, DVec2, DVec3, DVec4);
+
+impl<C: Coord<Scalar: PrimInt>> ICoord for C {}
 
 macro_rules! impl_coord3_for {
     ($($vec:ty),* $(,)?) => {
@@ -283,11 +326,6 @@ macro_rules! impl_coord3_for {
                 }
 
                 #[inline]
-                fn normalize(self) -> Self {
-                    self.normalize()
-                }
-
-                #[inline]
                 fn dot(self, other: Self) -> Self::Scalar {
                     self.dot(other)
                 }
@@ -305,6 +343,10 @@ impl_coord3_for!(
     Vec3, Vec3A, DVec3, I8Vec3, U8Vec3, I16Vec3, U16Vec3, IVec3, UVec3, I64Vec3, U64Vec3,
     ISizeVec3, USizeVec3,
 );
+
+impl<C: SCoord + Coord3> SCoord3 for C {}
+
+impl<C: FCoord + Coord3> FCoord3 for C {}
 
 macro_rules! impl_icoord3_for {
     ($($vec:ty),* $(,)?) => {
@@ -330,5 +372,3 @@ macro_rules! impl_icoord3_for {
 impl_icoord3_for!(
     I8Vec3, U8Vec3, I16Vec3, U16Vec3, IVec3, UVec3, I64Vec3, U64Vec3, ISizeVec3, USizeVec3,
 );
-
-impl<C: Coord3<Scalar: Signed> + Neg<Output = C>> SCoord3 for C {}

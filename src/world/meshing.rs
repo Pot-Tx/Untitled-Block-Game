@@ -1,6 +1,6 @@
 use crate::ecs::*;
 use crate::render::{AlphaVertex, Mesh, MeshGroup, NormTexVertex};
-use crate::util::collection::{CubicVec, Registry};
+use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3, Direction, ICoord3};
 use crate::util::Id;
 use crate::world::*;
@@ -47,10 +47,11 @@ pub struct BlockMeshTemplate {
     mesh: Mesh<NormTexVertex>,
     translucent: bool,
     cull: Option<Direction>,
-    spans: [Option<MergeSpan>; 3],
+    spans: SmallVec<[MergeSpan; 2]>,
 }
 
 pub struct MergeSpan {
+    axis: Axis,
     ends: Vec<usize>,
     uv_unit: Vec2,
 }
@@ -104,7 +105,7 @@ impl BlockMeshTemplate {
                 None
             };
 
-            let mut spans = [None, None, None];
+            let mut spans = SmallVec::new();
 
             for &maxis in merge_axis.iter() {
                 if maxis != axis {
@@ -124,7 +125,7 @@ impl BlockMeshTemplate {
                         },
                     };
 
-                    spans[maxis.idx()] = Some(MergeSpan { ends, uv_unit });
+                    spans.push(MergeSpan { axis: maxis, ends, uv_unit });
                 }
             }
 
@@ -179,6 +180,14 @@ pub struct ChunkMesher {
     result_tx: Sender<MeshingResult>,
 }
 
+struct MeshMerger {
+    lines: Vec<u64>,
+    side: u8,
+    axes: [Axis; 3],
+    two: bool,
+    current: (usize, u8),
+}
+
 impl Resource for ChunkMesher {}
 
 impl ChunkMesher {
@@ -227,9 +236,10 @@ impl ChunkMesher {
     }
 
     fn build_meshes(chunk: &Chunk) -> (Mesh<NormTexVertex>, Mesh<AlphaVertex>) {
-        let mut temp_poses = HashMap::new();
+        let mut temp_mergers = HashMap::new();
         let n = chunk.side - 2;
-
+        
+        let mut block_mesh = Mesh::new();
         let mut occlusion_mesh = Mesh::new();
 
         for x in 0..n {
@@ -302,88 +312,146 @@ impl ChunkMesher {
                             }
                         }
 
-                        temp_poses
-                            .entry(*temp_mesh)
-                            .or_insert_with(|| CubicVec::<bool>::new(n))
-                            .set(pos, true);
+                        if template.spans.is_empty() {
+                            block_mesh.merge(&template.mesh.with_texture(temp_mesh.texture).translated(pos.as_vec3()));
+                        } else {
+                            temp_mergers
+                                .entry(*temp_mesh)
+                                .or_insert_with(|| MeshMerger::new(n, &template.spans))
+                                .add(pos);
+                        }
                     }
                 }
             }
         }
 
-        let block_mesh = temp_poses
+        let merged = temp_mergers
             .into_par_iter()
-            .map(|(temp_mesh, mut poses)| {
+            .map(|(temp_mesh, merger)| {
+                
                 let template = BLOCK_MESH_TEMPLATES.get(temp_mesh.template);
-                let mut merged = Mesh::new();
-
-                for x in 0..n {
-                    for y in 0..n {
-                        for z in 0..n {
-                            let pos = RelBlockPos::new(x, y, z);
-
-                            if !poses.get(pos) {
-                                continue;
-                            }
-
-                            let mut mesh = template.mesh.translated(pos.as_vec3());
-
-                            let spans = &template.spans;
-                            let mut dpos = U8Vec3::ZERO;
-
-                            for &axis in Axis::ALL {
-                                let i = axis.idx();
-
-                                if let Some(span) = &spans[i] {
-                                    let max = n - pos.get(axis);
-
-                                    let dist = (1..max)
-                                        .find(|&d| 'a: {
-                                            let pos1 = pos.shift(axis, d);
-
-                                            if !poses.get(pos1) {
-                                                break 'a true;
-                                            }
-
-                                            for j in 0..i {
-                                                let axis1 = Axis::by_idx(j);
-
-                                                for k in 1..=dpos.get(axis1) {
-                                                    let pos2 = pos1.shift(axis1, k);
-                                                    if !poses.get(pos2) {
-                                                        break 'a true;
-                                                    }
-                                                }
-                                            }
-
-                                            false
-                                        })
-                                        .map(|d| d - 1)
-                                        .unwrap_or(max - 1);
-
-                                    for &end in span.ends.iter() {
-                                        let vertex = &mut mesh.vertices[end];
-
-                                        vertex.pos = vertex.pos.shift(axis, dist as f32);
-                                        vertex.uv += span.uv_unit * dist as f32;
-                                    }
-                                    dpos = dpos.with(axis, dist);
-                                }
-                            }
-
-                            poses.fill(pos, pos + dpos + 1, false);
-
-                            merged.merge(&mesh);
+                let base = template.mesh.with_texture(temp_mesh.texture);
+                
+                merger.map(|(pos, extent)| {
+                    let mut mesh = base.translated(pos.as_vec3());
+                    
+                    for (i, dist) in extent.into_iter().enumerate() {
+                        let span = &template.spans[i];
+                        
+                        for &end in span.ends.iter() {
+                            let vertex = &mut mesh.vertices[end];
+                            
+                            vertex.pos = vertex.pos.shift(span.axis, dist as f32);
+                            vertex.uv += span.uv_unit * dist as f32;
                         }
                     }
-                }
-
-                merged.with_texture(temp_mesh.texture)
+                    
+                    mesh
+                })
+                    .collect::<Vec<_>>()
+                    .merge()
             })
             .collect::<Vec<_>>()
             .merge();
+        
+        block_mesh.merge(&merged);
 
         (block_mesh, occlusion_mesh)
+    }
+}
+
+impl Iterator for MeshMerger {
+    type Item = (U8Vec3, SmallVec<[u8; 2]>);
+    
+    fn next(&mut self) -> Option<Self::Item> {
+        let n = self.side as usize;
+        
+        let (idx, bit) = &mut self.current;
+        
+        while *idx < n * n {
+            *bit += (self.lines[*idx] >> (*bit)).trailing_zeros() as u8;
+            if *bit >= self.side {
+                *bit = 0;
+                *idx += 1;
+            } else {
+                break;
+            }
+        }
+        
+        let (idx, bit) = self.current;
+        
+        if idx < n * n {
+            let pos = self.pos_of_bit(self.current);
+            let mut extent = SmallVec::new();
+            
+            let dist = (self.lines[idx] >> bit).trailing_ones() as u8 - 1;
+            let removal = !(((1u64 << (dist + 1)) - 1) << bit);
+            extent.push(dist);
+            self.lines[idx] &= removal;
+            
+            if self.two {
+                let mut dist1 = 0;
+                
+                for idx1 in idx + 1..((idx / n) + 1) * n {
+                    if (self.lines[idx1] >> bit).trailing_ones() as u8 > dist {
+                        dist1 += 1;
+                        self.lines[idx1] &= removal;
+                    } else {
+                        break;
+                    }
+                }
+                
+                extent.push(dist1);
+            }
+            
+            Some((pos, extent))
+        } else {
+            None
+        }
+    }
+}
+
+impl MeshMerger {
+    fn new(side: u8, spans: &[MergeSpan]) -> Self {
+        let masks = vec![0; (side as usize).pow(2)];
+        let mut axes = *Axis::ALL;
+        let span_count = spans.len();
+        for i in 0..span_count {
+            axes.swap(i, spans[i].axis.idx());
+        }
+        
+        Self {
+            lines: masks,
+            side,
+            axes,
+            two: span_count > 1,
+            current: (0, 0),
+        }
+    }
+    
+    #[inline]
+    fn pos_of_bit(&self, bit: (usize, u8)) -> U8Vec3 {
+        let (idx, bit) = bit;
+        let n = self.side as usize;
+        
+        U8Vec3::ZERO
+            .with(self.axes[0], bit)
+            .with(self.axes[1], (idx % n) as u8)
+            .with(self.axes[2], (idx / n) as u8)
+    }
+    
+    #[inline]
+    fn bit_of_pos(&self, pos: U8Vec3) -> (usize, u8) {
+        assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
+        
+        let n = self.side as usize;
+        let idx = pos.get(self.axes[1]) as usize + pos.get(self.axes[2]) as usize * n;
+        (idx, pos.get(self.axes[0]))
+    }
+    
+    fn add(&mut self, pos: U8Vec3) {
+        let (idx, bit) = self.bit_of_pos(pos);
+        self.lines[idx] |= 1u64 << bit;
     }
 }
 

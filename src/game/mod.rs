@@ -1,10 +1,13 @@
 mod client;
 mod input;
 
+use std::backtrace::Backtrace;
+use std::panic;
 use crate::game::client::GameClient;
 use anyhow::Result;
 use std::sync::LazyLock;
 use std::time::Duration;
+use log::error;
 use winit::error::EventLoopError;
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -31,5 +34,12 @@ impl Game {
         event_loop.set_control_flow(ControlFlow::Poll);
 
         event_loop.run_app(&mut self.client)
+    }
+    
+    pub fn crash(info: &panic::PanicHookInfo) {
+        error!("{}", info);
+        let trace = Backtrace::capture();
+        error!("{}", trace);
+        error!("Oh no, Game crashed!");
     }
 }

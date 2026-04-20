@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use num_traits::*;
@@ -160,8 +161,11 @@ impl Direction {
 pub trait Coord:
     Copy
     + Clone
+    + Debug
     + Pod
     + Zeroable
+    + Sync
+    + Send
     + Default
     + Add<Output = Self>
     + AddAssign
@@ -223,6 +227,8 @@ pub trait Coord3: Coord {
 
     #[must_use]
     fn cross(self, other: Self) -> Self;
+    
+    fn cuboid(min: Self, max: Self) -> [Self; 8];
 }
 
 pub trait SCoord3: SCoord + Coord3 {}
@@ -333,6 +339,22 @@ macro_rules! impl_coord3_for {
                 #[inline]
                 fn cross(self, other: Self) -> Self {
                     self.cross(other)
+                }
+                
+                #[inline]
+                fn cuboid(min: Self, max: Self) -> [Self; 8] {
+                    let (x0, y0, z0, x1, y1, z1) = (min.x, min.y, min.z, max.x, max.y, max.z);
+                    
+                    [
+                        Self::new(x0, y0, z0),
+                        Self::new(x0, y0, z1),
+                        Self::new(x0, y1, z0),
+                        Self::new(x0, y1, z1),
+                        Self::new(x1, y0, z0),
+                        Self::new(x1, y0, z1),
+                        Self::new(x1, y1, z0),
+                        Self::new(x1, y1, z1),
+                    ]
                 }
             }
         )*

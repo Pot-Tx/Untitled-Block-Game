@@ -2,6 +2,7 @@ use crate::util::coord::*;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use std::fmt::Debug;
+use std::marker::PhantomData;
 use wgpu::*;
 
 pub trait Vertex: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
@@ -22,6 +23,14 @@ pub trait Vertex: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
 pub trait Inst: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
     fn layout<'a, V: Vertex>() -> VertexBufferLayout<'a>;
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+pub struct NoVertex<C: Coord>(PhantomData<C>);
+
+unsafe impl<C: Coord> Pod for NoVertex<C> {}
+
+unsafe impl<C: Coord> Zeroable for NoVertex<C> {}
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -62,6 +71,10 @@ pub struct AlphaVertex {
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct NoInst;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct TransInst {
     pub pos: Vec3,
 }
@@ -89,6 +102,31 @@ macro_rules! vertex_basics {
             self
         }
     };
+}
+
+impl<C: Coord> Vertex for NoVertex<C> {
+    type Pos = C;
+    const ATTRIBUTE_COUNT: u32 = 0;
+    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
+        array_stride: 0,
+        step_mode: VertexStepMode::Vertex,
+        attributes: &[],
+    };
+    
+    #[inline]
+    fn translate(self, _: Self::Pos) -> Self {
+        self
+    }
+    
+    #[inline]
+    fn scale(self, _: Self::Pos) -> Self {
+        self
+    }
+    
+    #[inline]
+    fn multiply(self, _: <Self::Pos as Coord>::Scalar) -> Self {
+        self
+    }
 }
 
 impl Vertex for BasicVertex {
@@ -298,6 +336,16 @@ impl Vertex for AlphaVertex {
     fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
         self.pos *= scale;
         self
+    }
+}
+
+impl Inst for NoInst {
+    fn layout<'a, V: Vertex>() -> VertexBufferLayout<'a> {
+        VertexBufferLayout {
+            array_stride: 0,
+            step_mode: VertexStepMode::Instance,
+            attributes: &[],
+        }
     }
 }
 

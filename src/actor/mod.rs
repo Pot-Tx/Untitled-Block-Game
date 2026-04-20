@@ -2,6 +2,7 @@ mod control;
 
 use crate::components;
 use crate::ecs::*;
+use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 pub use control::*;
 use glam::{Vec2, Vec3};
@@ -23,8 +24,21 @@ fn build_actor_types() -> Registry<ActorType> {
                 .with(PlayerControlled)
         },
     };
+    let survivor = ActorType {
+        descriptor: || {
+            EntityDescriptor::new()
+                .with(Position(Vec3::splat(32.0)))
+                .with(Rotation(Vec3::ZERO))
+                .with(Velocity(Vec3::ZERO))
+                .with(Speed(0.5))
+                .with(PlayerControlled)
+                .with(Bound(AABB { min: Vec3::new(-0.25, -1.25, -0.25), max: Vec3::new(0.25, 0.25, 0.25) }))
+                .with(Option::<Selection>::None)
+        }
+    };
 
     actor_types.register(0, spectator);
+    actor_types.register(1, survivor);
 
     actor_types
 }
@@ -45,6 +59,7 @@ components! {
     pub struct Velocity(Vec3): Hot;
     pub struct Omega(Vec3): Hot;
     pub struct Speed(f32): Hot;
+    pub struct Bound(AABB<Vec3>): Hot;
 }
 
 impl Position {
@@ -60,6 +75,11 @@ impl Rotation {
         self.0[0] += rot.x;
         self.0[1] += rot.y;
         self.0[1] = self.0[1].clamp(-FRAC_PI_2, FRAC_PI_2);
+    }
+    
+    pub fn direction(&self) -> Vec3 {
+        let (cy, sy, cp, sp) = (self.0[0].cos(), self.0[0].sin(), self.0[1].cos(), self.0[1].sin());
+        Vec3::new(sy * cp, sp, -cy * cp).normalize()
     }
 }
 

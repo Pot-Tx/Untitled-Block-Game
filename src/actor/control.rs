@@ -1,16 +1,105 @@
 use crate::actor::*;
-use crate::components;
 use crate::ecs::*;
 use crate::game::*;
+use crate::render::*;
+use crate::util::bounding::{AABBGroup, Ray};
+use crate::util::coord::Direction;
+use crate::util::Id;
+use crate::world::{Block, BlockPos, Generate, World};
+use crate::components;
 use glam::Vec3;
+use std::marker::PhantomData;
+use wgpu::{LoadOp, PrimitiveTopology};
 
 components! {
     pub struct PlayerControlled: Cold;
 }
 
+pub struct Selection {
+    item: SelectedItem,
+    geometry: Geometry<BasicVertex>,
+    instance: Instances<TransInst>,
+}
+
+#[derive(Debug)]
+pub enum SelectedItem {
+    Block {
+        pos: BlockPos,
+        block: Block,
+        face: Direction,
+    },
+    Actor {
+        entity: Id,
+        pos: Vec3,
+        bound: AABB<Vec3>,
+    },
+}
+
+impl Component for Option<Selection> {
+    const STORAGE_TYPE: StorageType = StorageType::Cold;
+}
+
+impl SelectedItem {
+    fn update(&self, other: &Self) -> (bool, bool) {
+        match (self, other) {
+            (
+                Self::Block { pos, block, .. },
+                Self::Block { pos: pos1, block: block1, .. },
+            )
+                => (block != block1, pos != pos1),
+            
+            (
+                Self::Actor { entity, .. },
+                Self::Actor { entity: entity1, .. },
+            )
+                => (entity != entity1, true),
+            
+            _ => (true, true),
+        }
+    }
+    
+    fn mesh(&self) -> Mesh<BasicVertex> {
+        match self {
+            Self::Block { block, .. } => {
+                let bound = block
+                    .bounds()
+                    .merge()
+                    .expect("Selected Block doesn't have bounds");
+                Mesh::<BasicVertex>::frame(bound.min, bound.max)
+            }
+            _ => Mesh::new(),
+        }
+    }
+
+    fn inst(&self) -> TransInst {
+        TransInst {
+            pos: match self {
+                Self::Block { pos, .. } => pos.as_vec3(),
+                Self::Actor { pos, .. } => *pos,
+            },
+        }
+    }
+}
+
+impl Render<BasicVertex, TransInst> for Selection {
+    fn rendered(&self) -> Vec<RenderItem<'_, BasicVertex, TransInst>> {
+        vec![RenderItem {
+            geometry: &self.geometry,
+            instances: &self.instance,
+        }]
+    }
+}
+
 pub struct PlayerController;
 
 pub struct PlayerRotator;
+
+pub struct Selector<G: Generate>(pub PhantomData<G>);
+
+pub struct SelectionRenderer {
+    desc: RenderDescriptor<'static>,
+    batch: RenderBatch<Transformation, BasicVertex, TransInst>,
+}
 
 impl System for PlayerController {
     type CompQuery = (
@@ -70,5 +159,92 @@ impl System for PlayerRotator {
         entry.2.rotate(res.mouse_motion * *MOUSE_SENSITIVITY);
 
         None
+    }
+}
+
+impl<G: Generate> System for Selector<G> {
+    type CompQuery = (
+        CompWrite<Option<Selection>>,
+        CompRead<Position>,
+        CompRead<Rotation>,
+    );
+    type ResQuery = ResRead<World<G>>;
+
+    fn operate(
+        &mut self,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
+    ) -> Option<Vec<Command>> {
+        let ray = Ray {
+            origin: entry.2.0,
+            direction: entry.3.direction(),
+        };
+        
+        if let Some(item) = ray.traverse(res, 8.0) {
+            let canvas = CANVAS.read().unwrap();
+            
+            if let Some(selection) = entry.1 {
+                let (g, i) = selection.item.update(&item);
+                if g {
+                    selection.geometry = item.mesh().geometry(&canvas, "selection");
+                }
+                if i {
+                    selection.instance = [item.inst()].instances(&canvas, "selection");
+                }
+                
+                selection.item = item;
+            } else {
+                let geometry = item.mesh().geometry(&canvas, "selection");
+                let instance = [item.inst()].instances(&canvas, "selection");
+                
+                entry.1.replace(Selection { item, geometry, instance });
+            }
+        } else {
+            entry.1.take();
+        }
+
+        None
+    }
+}
+
+impl System for SelectionRenderer {
+    type CompQuery = CompRead<Option<Selection>>;
+    type ResQuery = (ResWrite<Option<Frame>>, ResRead<Camera>);
+    
+    fn operate(
+        &mut self,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
+    ) -> Option<Vec<Command>> {
+        if let Some(frame) = res.0 && let Some(selection) = entry.1 {
+            frame.render(&self.desc, |mut pass| {
+                self.batch.begin(&mut pass);
+                self.batch.push(&mut pass, &res.1.transform);
+                self.batch.draw(&mut pass, selection);
+            });
+        }
+        
+        None
+    }
+}
+
+impl SelectionRenderer {
+    pub fn new() -> Self {
+        let canvas = CANVAS.read().unwrap();
+        
+        Self {
+            desc: RenderDescriptor {
+                name: "selection",
+                color_load: LoadOp::Load,
+                depth_load: LoadOp::Load,
+            },
+            batch: RenderBatch::new(&canvas, &RenderBatchConfig {
+                name: "selection",
+                shader: "selection",
+                translucent: false,
+                topology: PrimitiveTopology::LineList,
+                depth_write: false,
+            }),
+        }
     }
 }

@@ -1,6 +1,9 @@
-use crate::util::coord::{Axis, Coord, Coord3, SCoord3};
+use crate::util::coord::{Axis, Coord, Coord3, FCoord, FCoord3};
 use num_traits::{FromPrimitive, Signed, Zero};
 use std::ops::Neg;
+use glam::{IVec3, Vec3};
+use crate::actor::SelectedItem;
+use crate::world::{Generate, World};
 
 #[derive(Copy, Clone, Debug)]
 pub struct AABB<C: Coord> {
@@ -10,6 +13,7 @@ pub struct AABB<C: Coord> {
 
 pub trait AABBGroup {
     type Coord: Coord;
+    
     fn merge(&self) -> Option<AABB<Self::Coord>>;
 }
 
@@ -80,7 +84,7 @@ impl<C: Coord> AABBGroup for [AABB<C>] {
 }
 
 #[derive(Copy, Clone, Default, Debug)]
-pub struct Plane<C: SCoord3> {
+pub struct Plane<C: FCoord3> {
     pub normal: C,
     pub d: C::Scalar,
 }
@@ -93,7 +97,7 @@ pub trait PlaneGroup {
     fn is_aabb_inside(&self, aabb: AABB<Self::Coord>) -> bool;
 }
 
-impl<C: SCoord3> Plane<C> {
+impl<C: FCoord3> Plane<C> {
     pub fn from_points(p0: C, p1: C, p2: C, orient: C) -> Self {
         let dir1 = p1 - p0;
         let dir2 = p2 - p0;
@@ -129,7 +133,7 @@ impl<C: SCoord3> Plane<C> {
     }
 }
 
-impl<C: SCoord3> PlaneGroup for [Plane<C>] {
+impl<C: FCoord3> PlaneGroup for [Plane<C>] {
     type Coord = C;
 
     fn is_point_inside(&self, point: C) -> bool {
@@ -148,5 +152,73 @@ impl<C: SCoord3> PlaneGroup for [Plane<C>] {
             }
         }
         true
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Ray<C: FCoord> {
+    pub origin: C,
+    pub direction: C,
+}
+
+impl<C: FCoord> Ray<C> {
+    pub fn intersects_with(&self, aabb: AABB<C>) -> bool {
+        let mind = aabb.min - self.origin;
+        let maxd = aabb.max - self.origin;
+        
+        let mut mint = C::default();
+        let mut maxt = C::default();
+        (0..C::DIM).for_each(|i| {
+            mint[i] = if self.direction[i] > C::Scalar::zero() { mind[i] } else { maxd[i] } / self.direction[i];
+            maxt[i] = if self.direction[i] < C::Scalar::zero() { mind[i] } else { maxd[i] } / self.direction[i];
+        });
+        
+        mint.max_element() < maxt.min_element()
+    }
+    
+    pub fn intersects_with_group(&self, aabbs: &[AABB<C>]) -> bool {
+        aabbs.iter().any(|&aabb| self.intersects_with(aabb))
+    }
+}
+
+impl Ray<Vec3> {
+    pub fn traverse<G: Generate>(&self, world: &World<G>, reach: f32) -> Option<SelectedItem> {
+        let mut origin = self.origin;
+        let mut pos = self.origin.floor().as_ivec3();
+        
+        let step = self.direction.signum().as_ivec3();
+        let offset = step.max(IVec3::ZERO);
+        
+        let mut axis = Axis::Y;
+        
+        while origin.distance(self.origin) < reach {
+            let block = world.get_block(pos);
+            
+            if block.bounds().iter().any(|&aabb| self.intersects_with(aabb.translate(pos.as_vec3()))) {
+                return Some(SelectedItem::Block {
+                    pos,
+                    block,
+                    face: axis.direction(self.direction.get(axis) < 0.0),
+                });
+            }
+            
+            let dpos = (pos + offset).as_vec3() - origin;
+            let times = dpos / self.direction;
+            
+            let mut time = f32::INFINITY;
+            
+            for &a in Axis::ALL {
+                let t = times.get(a);
+                if t >= 0.0 && t < time {
+                    time = t;
+                    axis = a;
+                }
+            }
+            
+            origin += self.direction * time;
+            pos = pos.shift(axis, step.get(axis));
+        }
+        
+        None
     }
 }

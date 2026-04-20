@@ -1,3 +1,6 @@
+use std::fmt;
+use std::fmt::Debug;
+use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
 use crate::world::meshing::BlockModel;
@@ -12,7 +15,9 @@ fn build_block_types() -> Registry<BlockType> {
 
     let air = BlockType {
         models: vec![BlockModel::empty()],
+        bounds: vec![vec![]],
         model_idx_of_state: |_| -> usize { 0 },
+        bounds_idx_of_state: |_| -> usize { 0 },
         opacity: Vec3::ZERO,
     };
 
@@ -43,7 +48,9 @@ fn build_block_types() -> Registry<BlockType> {
                 texture: 1,
             },
         ])],
+        bounds: vec![vec![AABB { min: Vec3::ZERO, max: Vec3::ONE }]],
         model_idx_of_state: |_| -> usize { 0 },
+        bounds_idx_of_state: |_| -> usize { 0 },
         opacity: Vec3::ONE,
     };
 
@@ -58,7 +65,9 @@ pub type State = u8;
 
 pub struct BlockType {
     pub models: Vec<BlockModel>,
+    pub bounds: Vec<Vec<AABB<Vec3>>>,
     pub model_idx_of_state: fn(State) -> usize,
+    pub bounds_idx_of_state: fn(State) -> usize,
     pub opacity: Vec3,
 }
 
@@ -82,6 +91,15 @@ impl Eq for Block {}
 impl PartialEq<Self> for Block {
     fn eq(&self, other: &Self) -> bool {
         self.type_id == other.type_id && self.state == other.state
+    }
+}
+
+impl Debug for Block {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Block")
+            .field("type_id", &self.type_id)
+            .field("state", &self.state)
+            .finish()
     }
 }
 
@@ -128,5 +146,11 @@ impl Block {
     pub fn model(&self) -> &BlockModel {
         let block_type = self.block_type;
         &block_type.models[(block_type.model_idx_of_state)(self.state)]
+    }
+    
+    #[inline]
+    pub fn bounds(&self) -> &[AABB<Vec3>] {
+        let block_type = self.block_type;
+        &block_type.bounds[(block_type.bounds_idx_of_state)(self.state)]
     }
 }

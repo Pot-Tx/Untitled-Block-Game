@@ -126,15 +126,18 @@ impl GameClient {
         simulation.components.register::<Velocity>();
         simulation.components.register::<Speed>();
         simulation.components.register::<PlayerControlled>();
+        simulation.components.register::<Bound>();
+        simulation.components.register::<Option<Selection>>();
 
         simulation.systems.register(0, PlayerController);
         simulation.systems.register(1, Translator);
         simulation.systems.register(2, Friction);
+        simulation.systems.register(3, Selector::<TestGen>(PhantomData));
+        simulation.systems.register(4, InputFlusher);
         simulation
             .systems
-            .register(3, WorldUpdater(PhantomData::<TestGen>));
-        simulation.systems.register(4, ChunkMeshing);
-        simulation.systems.register(5, InputFlusher);
+            .register(5, WorldUpdater(PhantomData::<TestGen>));
+        simulation.systems.register(6, ChunkMeshing);
 
         simulation.resources.register(InputState::new());
         let near_threads = ThreadPoolBuilder::new()
@@ -170,7 +173,7 @@ impl GameClient {
         render_systems.register(1, CameraTransformer);
         render_systems.register(2, RenderStarter);
         render_systems.register(4, RenderFinisher);
-        render_systems.register(5, MouseMotionFlusher);
+        render_systems.register(4, MouseMotionFlusher);
 
         Self {
             window: None,
@@ -200,10 +203,12 @@ impl GameClient {
         CANVAS.init(RwLock::new(canvas));
 
         let world_renderer = WorldRenderer::new();
+        let selection_renderer = SelectionRenderer::new();
 
         self.render_systems.register(3, world_renderer);
+        self.render_systems.register(3, selection_renderer);
         self.simulation.resources.register(block_textures);
         self.simulation.resources.register(camera);
-        self.simulation.spawn(ACTOR_TYPES.get(0).create());
+        self.simulation.spawn(ACTOR_TYPES.get(1).create());
     }
 }

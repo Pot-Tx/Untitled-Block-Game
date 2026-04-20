@@ -5,11 +5,10 @@ pub mod erasure;
 pub mod math;
 pub mod transform;
 
-use crate::render::{Geometry, Vertex};
 use log::error;
 use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::{LazyLock, OnceLock};
+use std::sync::OnceLock;
 
 pub type Id = u32;
 

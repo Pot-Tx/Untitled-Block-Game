@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 use wgpu::*;
 
 pub trait BindRes {
-    fn as_resource(&self) -> BindingResource;
+    fn as_resource(&self) -> BindingResource<'_>;
 }
 
 pub trait BindContent<'a> {
@@ -51,19 +51,19 @@ impl<S: BindSignature> FromConfig<BindSetConfig<'_, S>> for BindSet<S> {
 }
 
 impl BindRes for TextureView {
-    fn as_resource(&self) -> BindingResource {
+    fn as_resource(&self) -> BindingResource<'_> {
         BindingResource::TextureView(self)
     }
 }
 
 impl BindRes for Sampler {
-    fn as_resource(&self) -> BindingResource {
+    fn as_resource(&self) -> BindingResource<'_> {
         BindingResource::Sampler(self)
     }
 }
 
 impl BindRes for Buffer {
-    fn as_resource(&self) -> BindingResource {
+    fn as_resource(&self) -> BindingResource<'_> {
         self.as_entire_binding()
     }
 }

@@ -187,33 +187,7 @@ impl<V: Vertex> MeshGroup for [Mesh<V>] {
 
 impl Mesh<BasicVertex> {
     pub fn cuboid(min: Vec3, max: Vec3) -> [Self; 6] {
-        let (x0, y0, z0, x1, y1, z1) = (min.x, min.y, min.z, max.x, max.y, max.z);
-        let p = [
-            BasicVertex {
-                pos: Vec3::new(x0, y0, z0),
-            },
-            BasicVertex {
-                pos: Vec3::new(x0, y0, z1),
-            },
-            BasicVertex {
-                pos: Vec3::new(x0, y1, z0),
-            },
-            BasicVertex {
-                pos: Vec3::new(x0, y1, z1),
-            },
-            BasicVertex {
-                pos: Vec3::new(x1, y0, z0),
-            },
-            BasicVertex {
-                pos: Vec3::new(x1, y0, z1),
-            },
-            BasicVertex {
-                pos: Vec3::new(x1, y1, z0),
-            },
-            BasicVertex {
-                pos: Vec3::new(x1, y1, z1),
-            },
-        ];
+        let p = Vec3::cuboid(min, max).map(|pos| BasicVertex { pos });
 
         [
             Self {
@@ -241,6 +215,28 @@ impl Mesh<BasicVertex> {
                 indices: Vec::from(QUAD_INDICES),
             },
         ]
+    }
+    
+    pub fn frame(min: Vec3, max: Vec3) -> Self {
+        let p = Vec3::cuboid(min, max).map(|pos| BasicVertex { pos });
+        
+        Self {
+            vertices: Vec::from(p),
+            indices: vec![
+                0, 1,
+                0, 2,
+                0, 4,
+                1, 3,
+                1, 5,
+                2, 3,
+                2, 6,
+                3, 7,
+                4, 5,
+                4, 6,
+                5, 7,
+                6, 7,
+            ],
+        }
     }
 
     pub fn with_texture(&self, tex: Id, uvs: Vec<Vec2>) -> Mesh<TexVertex> {

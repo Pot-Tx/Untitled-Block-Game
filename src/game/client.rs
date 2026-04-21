@@ -167,6 +167,7 @@ impl GameClient {
         
         render_systems.register(0, Escaper);
         render_systems.register(1, PlayerRotator);
+        render_systems.register(2, Interactor(PhantomData::<TestGen>));
         render_systems.register(2, CameraTransformer);
         render_systems.register(3, InputFlusher);
         render_systems.register(3, RenderStarter);

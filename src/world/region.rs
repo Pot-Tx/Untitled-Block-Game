@@ -15,6 +15,7 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
+use smallvec::SmallVec;
 
 pub type Chunk = CubicVec<Meta>;
 pub type RelBlockPos = U8Vec3;
@@ -377,8 +378,8 @@ pub struct Region<G: Generate> {
 }
 
 pub enum RegionMode<G: Generate> {
-    Near(VecMode),
-    Far(TreeMode<G>),
+    Vec(VecMode),
+    Tree(TreeMode<G>),
 }
 
 pub struct RegionContext<G: Generate> {
@@ -391,7 +392,7 @@ pub struct VecMode {
     pub blocks: Arc<RwLock<CubicVec<Meta>>>,
     dirty_chunks: HashSet<ChunkPos>,
 
-    gen_rx: Receiver<GenResultBatch<Area>>,
+    gen_rx: Option<Receiver<GenResultBatch<Area>>>,
 }
 
 pub struct TreeMode<G: Generate> {
@@ -422,29 +423,29 @@ impl<G: Generate> Region<G> {
 
     pub fn get_block(&self, pos: RelBlockPos) -> Block {
         match &self.mode {
-            RegionMode::Near(mode) => {
+            RegionMode::Vec(mode) => {
                 let blocks = mode.blocks.read().unwrap();
                 Block::from_meta(*blocks.get(pos + 1))
             }
-
-            RegionMode::Far(_) => Block::air(),
+            
+            RegionMode::Tree(_) => Block::air(),
         }
     }
 
-    pub fn set_block(&mut self, pos: RelBlockPos, block: Block) {
+    pub fn set_block(&mut self, pos: U8Vec3, block: Block) -> bool {
         match &mut self.mode {
-            RegionMode::Near(mode) => {
-                let mut blocks = mode.blocks.write().unwrap();
-                blocks.set(pos + 1, block.to_meta())
+            RegionMode::Vec(mode) => {
+                mode.set_block(pos, block);
+                true
             }
 
-            _ => (),
+            RegionMode::Tree(_) => false,
         }
     }
 
     pub fn update(&mut self, context: &RegionContext<G>, threads: &ThreadPool) -> bool {
         match &mut self.mode {
-            RegionMode::Near(_) => {
+            RegionMode::Vec(_) => {
                 if context.depths.is_none() {
                     false
                 } else {
@@ -452,13 +453,10 @@ impl<G: Generate> Region<G> {
                     true
                 }
             }
-
-            RegionMode::Far(mode) => {
+            
+            RegionMode::Tree(mode) => {
                 if let Some((min_depth, max_depth)) = context.depths {
-                    let min = mode.set_min_depth(min_depth, threads);
-                    let max = mode.set_max_depth(max_depth, threads);
-
-                    if min || max { true } else { false }
+                    mode.set_min_depth(min_depth, threads) | mode.set_max_depth(max_depth, threads)
                 } else {
                     self.mode = RegionMode::new(self.pos, context, threads);
                     true
@@ -469,16 +467,16 @@ impl<G: Generate> Region<G> {
 
     pub fn poll(&mut self, threads: &ThreadPool) -> bool {
         let finished = match &mut self.mode {
-            RegionMode::Near(mode) => mode.poll_generation(),
-
-            RegionMode::Far(mode) => mode.poll_splits(threads) & mode.poll_folds(threads),
+            RegionMode::Vec(mode) => mode.poll_generation(),
+            
+            RegionMode::Tree(mode) => mode.poll_splits(threads) & mode.poll_folds(threads),
         };
 
         if finished {
             let pos = self.pos;
 
             match &mut self.mode {
-                RegionMode::Near(mode) => {
+                RegionMode::Vec(mode) => {
                     for chunk_pos in mode.dirty_chunks.drain() {
                         let blocks = mode.blocks.clone();
                         let meshing_tx = self.meshing_tx.clone();
@@ -501,8 +499,8 @@ impl<G: Generate> Region<G> {
                         });
                     }
                 }
-
-                RegionMode::Far(mode) => {
+                
+                RegionMode::Tree(mode) => {
                     let tree = mode.tree.clone();
                     let depth = mode.max_depth;
                     let meshing_tx = self.meshing_tx.clone();
@@ -534,15 +532,15 @@ impl<G: Generate> Region<G> {
 
     pub fn is_near(&self) -> bool {
         match self.mode {
-            RegionMode::Near(_) => true,
-            RegionMode::Far(_) => false,
+            RegionMode::Vec(_) => true,
+            RegionMode::Tree(_) => false,
         }
     }
 
     pub fn is_far(&self) -> bool {
         match self.mode {
-            RegionMode::Near(_) => false,
-            RegionMode::Far(_) => true,
+            RegionMode::Vec(_) => false,
+            RegionMode::Tree(_) => true,
         }
     }
 }
@@ -550,23 +548,23 @@ impl<G: Generate> Region<G> {
 impl<G: Generate> RegionMode<G> {
     fn new(pos: RegionPos, context: &RegionContext<G>, threads: &ThreadPool) -> Self {
         match context.depths {
-            Some((min_depth, max_depth)) => Self::Far(TreeMode::new(
+            Some((min_depth, max_depth)) => Self::Tree(TreeMode::new(
                 pos,
                 &context.generator,
                 min_depth,
                 max_depth,
                 threads,
             )),
-            None => Self::Near(VecMode::new(pos, &context.generator, threads)),
+            None => Self::Vec(VecMode::new(pos, &context.generator, threads)),
         }
     }
 }
 
 impl VecMode {
     pub const CHUNK_SIZE: u8 = 16;
-    const CHUNK_POSES: [ChunkPos; 64] = Self::near_chunk_poses();
-
-    const fn near_chunk_poses() -> [ChunkPos; 64] {
+    const CHUNK_POSES: [ChunkPos; 64] = Self::chunk_poses();
+    
+    const fn chunk_poses() -> [ChunkPos; 64] {
         let mut poses = [RelBlockPos::ZERO; 64];
 
         let mut x = 0;
@@ -586,6 +584,32 @@ impl VecMode {
 
         poses
     }
+    
+    #[inline]
+    fn pos_influence(pos: U8Vec3) -> SmallVec<[ChunkPos; 8]> {
+        let mut influenced = SmallVec::new();
+        
+        fn range(b: u8) -> (u8, u8) {
+            let b = b as i16;
+            let min = ((b - 17) / 16).max(0);
+            let max = (b / 16).min(3);
+            (min as u8, max as u8)
+        }
+        
+        let (minx, maxx) = range(pos.x);
+        let (miny, maxy) = range(pos.y);
+        let (minz, maxz) = range(pos.z);
+        
+        for x in minx..=maxx {
+            for y in miny..=maxy {
+                for z in minz..=maxz {
+                    influenced.push(ChunkPos::new(x, y, z));
+                }
+            }
+        }
+        
+        influenced
+    }
 
     fn new<G: Generate>(pos: RegionPos, generator: &Arc<G>, threads: &ThreadPool) -> Self {
         let origin = pos * REGION_SIZE as i32;
@@ -596,7 +620,7 @@ impl VecMode {
             blocks: Arc::new(RwLock::new(blocks)),
             dirty_chunks: HashSet::from(Self::CHUNK_POSES),
 
-            gen_rx,
+            gen_rx: Some(gen_rx),
         };
 
         let generator = generator.clone();
@@ -610,17 +634,35 @@ impl VecMode {
 
         region
     }
+    
+    fn get_block(&self, pos: RelBlockPos) -> Block {
+        let blocks = self.blocks.read().unwrap();
+        Block::from_meta(*blocks.get(pos + 1))
+    }
+    
+    fn set_block(&mut self, pos: U8Vec3, block: Block) {
+        let mut blocks = self.blocks.write().unwrap();
+        blocks.set(pos, block.to_meta());
+        self.dirty_chunks.extend(Self::pos_influence(pos));
+    }
 
     fn poll_generation(&mut self) -> bool {
-        if let Ok(results) = self.gen_rx.try_recv() {
-            for result in results.results {
-                let mut chunk = self.blocks.write().unwrap();
-                *chunk = result.output;
+        match &self.gen_rx {
+            Some(gen_rx) => {
+                if let Ok(results) = gen_rx.try_recv() {
+                    for result in results.results {
+                        let mut chunk = self.blocks.write().unwrap();
+                        *chunk = result.output;
+                    }
+                    
+                    self.gen_rx = None;
+                    true
+                } else {
+                    false
+                }
             }
-
-            true
-        } else {
-            false
+            
+            None => true,
         }
     }
 }

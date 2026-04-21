@@ -341,3 +341,59 @@ impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch> ResQuery for (R, S, T, 
         ));
     }
 }
+
+impl<C: CompFetch, D: CompFetch, E: CompFetch, G: CompFetch, H: CompFetch> CompQuery for (C, D, E, G, H) {
+    type Item<'a> = (Id, C::Item<'a>, D::Item<'a>, E::Item<'a>, G::Item<'a>, H::Item<'a>);
+    
+    fn access() -> Access {
+        let mut access = Access::new();
+        C::add_to(&mut access);
+        D::add_to(&mut access);
+        E::add_to(&mut access);
+        G::add_to(&mut access);
+        H::add_to(&mut access);
+        access
+    }
+    
+    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
+        let d = D::new(components);
+        let e = E::new(components);
+        let g = G::new(components);
+        let h = H::new(components);
+        unsafe {
+            for (i, c) in C::iter(components) {
+                if let Some(d) = d.get(i)
+                    && let Some(e) = e.get(i)
+                    && let Some(g) = g.get(i)
+                    && let Some(h) = h.get(i)
+                {
+                    f((i, c, d, e, g, h));
+                }
+            }
+        }
+    }
+}
+
+impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch, V: ResFetch> ResQuery for (R, S, T, U, V) {
+    type Item<'a> = (R::Item<'a>, S::Item<'a>, T::Item<'a>, U::Item<'a>, V::Item<'a>);
+    
+    fn access() -> Access {
+        let mut access = Access::new();
+        R::add_to(&mut access);
+        S::add_to(&mut access);
+        T::add_to(&mut access);
+        U::add_to(&mut access);
+        V::add_to(&mut access);
+        access
+    }
+    
+    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
+        f((
+            R::get(resources),
+            S::get(resources),
+            T::get(resources),
+            U::get(resources),
+            V::get(resources),
+        ));
+    }
+}

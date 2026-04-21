@@ -4,7 +4,7 @@ use crate::ecs::*;
 use crate::game::*;
 use crate::render::*;
 use crate::util::bounding::{AABBGroup, Ray};
-use crate::util::coord::Direction;
+use crate::util::coord::{Direction, ICoord3};
 use crate::util::Id;
 use crate::world::{Block, BlockPos, Generate, World};
 use glam::Vec3;
@@ -95,6 +95,8 @@ pub struct PlayerController;
 pub struct PlayerRotator;
 
 pub struct Selector<G: Generate>(pub PhantomData<G>);
+
+pub struct Interactor<G: Generate>(pub PhantomData<G>);
 
 pub struct SelectionRenderer {
     desc: RenderDescriptor<'static>,
@@ -205,6 +207,41 @@ impl<G: Generate> System for Selector<G> {
             entry.1.take();
         }
 
+        None
+    }
+}
+
+impl<G: Generate> System for Interactor<G> {
+    type CompQuery = (CompRead<PlayerControlled>, CompRead<Option<Selection>>);
+    type ResQuery = (ResRead<InputState>, ResWrite<World<G>>);
+    
+    fn operate(
+        &mut self,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
+    ) -> Option<Vec<Command>> {
+        if let Some(selection) = entry.2 {
+            if res.0.is_action_present(7) {
+                match selection.item {
+                    SelectedItem::Block { pos, .. } => {
+                        res.1.set_block(pos, Block::air());
+                    }
+                    
+                    SelectedItem::Actor { .. } => (),
+                }
+            }
+            
+            if res.0.is_action_present(8) {
+                match selection.item {
+                    SelectedItem::Block { pos, face, .. } => {
+                        res.1.set_block(pos.step(face), Block::default_of(1));
+                    }
+                    
+                    SelectedItem::Actor { .. } => (),
+                }
+            }
+        }
+        
         None
     }
 }

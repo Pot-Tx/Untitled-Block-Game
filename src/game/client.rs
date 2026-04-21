@@ -1,21 +1,21 @@
 use crate::actor::*;
 use crate::ecs::*;
-use crate::game::input::{InputFlusher, InputState, MouseMotionFlusher};
-use crate::game::{FRAME_DURATION, TICK_DURATION};
+use crate::game::{Escaper, InputFlusher, InputState, FRAME_DURATION, TICK_DURATION};
 use crate::render::*;
+use crate::util::OnceInit;
 use crate::world::*;
 use crossbeam_channel::unbounded;
 use rayon::ThreadPoolBuilder;
 use std::marker::PhantomData;
-use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 
+pub static WINDOW: OnceInit<Window> = OnceInit::new();
+
 pub struct GameClient {
-    window: Option<Arc<Window>>,
     frame_timer: Instant,
     tick_timer: Instant,
 
@@ -25,8 +25,14 @@ pub struct GameClient {
 
 impl ApplicationHandler for GameClient {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
-            self.init(event_loop);
+        if !WINDOW.ready() {
+            WINDOW.init(
+                event_loop
+                    .create_window(Window::default_attributes().with_title("To be Titled"))
+                    .expect("Failed to create window"),
+            );
+            
+            self.init();
         }
     }
 
@@ -37,8 +43,7 @@ impl ApplicationHandler for GameClient {
             }
 
             WindowEvent::Resized(size) => {
-                let canvas = &CANVAS;
-                canvas.write().unwrap().resize(size);
+                self.simulation.resources.get_mut::<Canvas>().resize(size);
             }
 
             WindowEvent::RedrawRequested => {
@@ -51,7 +56,6 @@ impl ApplicationHandler for GameClient {
                 self.simulation
                     .resources
                     .get_mut::<InputState>()
-                    .cast_mut::<InputState>()
                     .push_key_event(event);
             }
 
@@ -59,7 +63,6 @@ impl ApplicationHandler for GameClient {
                 self.simulation
                     .resources
                     .get_mut::<InputState>()
-                    .cast_mut::<InputState>()
                     .push_cursor_pos(position);
             }
 
@@ -67,7 +70,6 @@ impl ApplicationHandler for GameClient {
                 self.simulation
                     .resources
                     .get_mut::<InputState>()
-                    .cast_mut::<InputState>()
                     .push_button_event(button, state);
             }
 
@@ -81,7 +83,6 @@ impl ApplicationHandler for GameClient {
                 self.simulation
                     .resources
                     .get_mut::<InputState>()
-                    .cast_mut::<InputState>()
                     .push_mouse_motion(delta);
             }
 
@@ -92,7 +93,7 @@ impl ApplicationHandler for GameClient {
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
         if self.tick_timer.elapsed() >= *TICK_DURATION {
             self.tick_timer = Instant::now();
-
+            
             self.simulation.update();
         }
 
@@ -101,15 +102,9 @@ impl ApplicationHandler for GameClient {
 
             let partial_tick =
                 self.tick_timer.elapsed().as_secs_f32() / TICK_DURATION.as_secs_f32();
-            self.simulation
-                .resources
-                .get_mut::<PartialTick>()
-                .cast_mut::<PartialTick>()
-                .0 = partial_tick;
-
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
+            self.simulation.resources.get_mut::<PartialTick>().0 = partial_tick;
+            
+            WINDOW.request_redraw();
         }
     }
 }
@@ -132,12 +127,13 @@ impl GameClient {
         simulation.systems.register(0, PlayerController);
         simulation.systems.register(1, Translator);
         simulation.systems.register(2, Friction);
-        simulation.systems.register(3, Selector::<TestGen>(PhantomData));
-        simulation.systems.register(4, InputFlusher);
         simulation
             .systems
-            .register(5, WorldUpdater(PhantomData::<TestGen>));
-        simulation.systems.register(6, ChunkMeshing);
+            .register(3, Selector::<TestGen>(PhantomData));
+        simulation
+            .systems
+            .register(4, WorldUpdater(PhantomData::<TestGen>));
+        simulation.systems.register(5, ChunkMeshing);
 
         simulation.resources.register(InputState::new());
         let near_threads = ThreadPoolBuilder::new()
@@ -168,15 +164,15 @@ impl GameClient {
         simulation.resources.register(PartialTick(0.0));
 
         let mut render_systems = SystemManager::new();
-
-        render_systems.register(0, PlayerRotator);
-        render_systems.register(1, CameraTransformer);
-        render_systems.register(2, RenderStarter);
-        render_systems.register(4, RenderFinisher);
-        render_systems.register(4, MouseMotionFlusher);
+        
+        render_systems.register(0, Escaper);
+        render_systems.register(1, PlayerRotator);
+        render_systems.register(2, CameraTransformer);
+        render_systems.register(3, InputFlusher);
+        render_systems.register(3, RenderStarter);
+        render_systems.register(5, RenderFinisher);
 
         Self {
-            window: None,
             frame_timer: Instant::now(),
             tick_timer: Instant::now(),
 
@@ -184,31 +180,24 @@ impl GameClient {
             render_systems,
         }
     }
-
-    pub fn init(&mut self, event_loop: &ActiveEventLoop) {
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes().with_title("To be Titled"))
-                .expect("Failed to create window"),
-        );
-
-        let canvas = pollster::block_on(Canvas::new(&window));
-        self.window = Some(window);
+    
+    pub fn init(&mut self) {
+        let canvas = pollster::block_on(Canvas::new(&WINDOW));
 
         let block_textures =
             BlockTextures(create_block_textures().create_texture_sampler(&canvas, "block"));
-
         let camera = Camera::new(&canvas);
-
-        CANVAS.init(RwLock::new(canvas));
-
-        let world_renderer = WorldRenderer::new();
-        let selection_renderer = SelectionRenderer::new();
+        let world_renderer = WorldRenderer::new(&canvas);
+        let selection_renderer = SelectionRenderer::new(&canvas);
 
         self.render_systems.register(3, world_renderer);
         self.render_systems.register(3, selection_renderer);
+        self.simulation.resources.register(canvas);
         self.simulation.resources.register(block_textures);
         self.simulation.resources.register(camera);
         self.simulation.spawn(ACTOR_TYPES.get(1).create());
+        
+        self.simulation.systems.init();
+        self.render_systems.init();
     }
 }

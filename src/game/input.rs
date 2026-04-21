@@ -1,4 +1,5 @@
 use crate::ecs::*;
+use crate::game::client::WINDOW;
 use crate::util::collection::Registry;
 use crate::util::Id;
 use glam::Vec2;
@@ -8,13 +9,18 @@ use std::sync::LazyLock;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton};
 use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::CursorGrabMode;
 
 pub static INPUT_MAP: LazyLock<Registry<Input>> = LazyLock::new(|| build_input_map());
 pub static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 64.0);
 
 fn build_input_map() -> Registry<Input> {
     let mut input_map = Registry::new();
-
+    
+    let escape = Input {
+        button: InputButton::Key(KeyCode::Escape),
+        input_type: InputType::JustPressed,
+    };
     let forward = Input {
         button: InputButton::Key(KeyCode::KeyW),
         input_type: InputType::Pressed,
@@ -39,18 +45,14 @@ fn build_input_map() -> Registry<Input> {
         button: InputButton::Key(KeyCode::ShiftLeft),
         input_type: InputType::Pressed,
     };
-
-    input_map.register(0, forward);
-
-    input_map.register(1, left);
-
-    input_map.register(2, backward);
-
-    input_map.register(3, right);
-
-    input_map.register(4, ascend);
-
-    input_map.register(5, descend);
+    
+    input_map.register(0, escape);
+    input_map.register(1, forward);
+    input_map.register(2, left);
+    input_map.register(3, backward);
+    input_map.register(4, right);
+    input_map.register(5, ascend);
+    input_map.register(6, descend);
 
     input_map
 }
@@ -76,6 +78,7 @@ pub struct InputState {
     pressed_keys: HashSet<KeyCode>,
     just_pressed_keys: HashSet<KeyCode>,
     just_released_keys: HashSet<KeyCode>,
+    pub cursor_grabbed: bool,
     pub cursor_pos: Vec2,
     pub mouse_motion: Vec2,
     pressed_buttons: HashSet<MouseButton>,
@@ -130,14 +133,29 @@ impl InputState {
     }
 
     pub fn clear(&mut self) {
+        self.mouse_motion = Vec2::ZERO;
         self.just_pressed_keys.clear();
         self.just_released_keys.clear();
         self.just_pressed_buttons.clear();
         self.just_released_buttons.clear();
     }
-
-    pub fn clear_mouse_motion(&mut self) {
-        self.mouse_motion = Vec2::ZERO;
+    
+    fn clear_action(&mut self, action_id: Id) {
+        let input = INPUT_MAP.get(action_id);
+        
+        match input.button {
+            InputButton::Key(key) => match input.input_type {
+                InputType::Pressed => self.pressed_keys.remove(&key),
+                InputType::JustPressed => self.just_pressed_keys.remove(&key),
+                InputType::JustReleased => self.just_released_keys.remove(&key),
+            },
+            
+            InputButton::Mouse(button) => match input.input_type {
+                InputType::Pressed => self.pressed_buttons.remove(&button),
+                InputType::JustPressed => self.just_pressed_buttons.remove(&button),
+                InputType::JustReleased => self.just_released_buttons.remove(&button),
+            },
+        };
     }
 
     #[inline]
@@ -194,36 +212,51 @@ impl InputState {
     }
 }
 
+pub struct Escaper;
+
 pub struct InputFlusher;
 
-pub struct MouseMotionFlusher;
+impl System for Escaper {
+    type CompQuery = ();
+    type ResQuery = ResWrite<InputState>;
+    
+    fn operate<'a>(
+        &mut self,
+        _: <Self::CompQuery as CompQuery>::Item<'a>,
+        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
+    ) -> Option<Vec<Command>> {
+        if res.is_action_present(0) {
+            res.cursor_grabbed = !res.cursor_grabbed;
+            if res.cursor_grabbed {
+                let width = WINDOW.inner_size().width;
+                let height = WINDOW.inner_size().height;
+                WINDOW.set_cursor_position(PhysicalPosition::new(width / 2, height / 2))
+                    .expect("Failed to center cursor");
+                WINDOW.set_cursor_grab(CursorGrabMode::Locked)
+                    .expect("Failed to grab cursor");
+                WINDOW.set_cursor_visible(false);
+            } else {
+                WINDOW.set_cursor_grab(CursorGrabMode::None)
+                    .expect("Failed to grab cursor");
+                WINDOW.set_cursor_visible(true);
+            }
+        }
+        
+        None
+    }
+}
 
 impl System for InputFlusher {
     type CompQuery = ();
     type ResQuery = ResWrite<InputState>;
-
+    
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
         res.clear();
-
-        None
-    }
-}
-
-impl System for MouseMotionFlusher {
-    type CompQuery = ();
-    type ResQuery = ResWrite<InputState>;
-
-    fn operate<'a>(
-        &mut self,
-        _: <Self::CompQuery as CompQuery>::Item<'a>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
-    ) -> Option<Vec<Command>> {
-        res.clear_mouse_motion();
-
+        
         None
     }
 }

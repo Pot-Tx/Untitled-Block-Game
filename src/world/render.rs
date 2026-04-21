@@ -63,28 +63,25 @@ impl RenderedWorld {
             meshing_rx,
         }
     }
-
-    pub fn update(&mut self, center: RegionPos) {
-        {
-            let canvas = CANVAS.read().unwrap();
-            while let Ok(result) = self.meshing_rx.try_recv() {
-                let pos = result.pos;
-
-                if ((pos - self.center).abs().element_sum() as u32) >= self.radius {
-                    continue;
-                }
-
-                if let Some(region) = self.regions.get_mut(&pos) {
-                    region.update(&canvas, result);
-                } else {
-                    let is_far = result.chunk_pos.is_none();
-                    let mut region = RenderedRegion::new(pos, is_far);
-                    region.update(&canvas, result);
-                    self.regions.insert(pos, region);
-                }
-
-                self.active_regions.insert(pos);
-            }
+	
+	pub fn update(&mut self, canvas: &Canvas, center: RegionPos) {
+		while let Ok(result) = self.meshing_rx.try_recv() {
+			let pos = result.pos;
+			
+			if ((pos - self.center).abs().element_sum() as u32) >= self.radius {
+				continue;
+			}
+			
+			if let Some(region) = self.regions.get_mut(&pos) {
+				region.update(&canvas, result);
+			} else {
+				let is_far = result.chunk_pos.is_none();
+				let mut region = RenderedRegion::new(pos, is_far);
+				region.update(&canvas, result);
+				self.regions.insert(pos, region);
+			}
+			
+			self.active_regions.insert(pos);
         }
 
         self.active_regions.retain(|pos| {
@@ -368,9 +365,7 @@ impl System for WorldRenderer {
 }
 
 impl WorldRenderer {
-    pub fn new() -> Self {
-        let canvas = CANVAS.read().unwrap();
-
+	pub fn new(canvas: &Canvas) -> Self {
         Self {
             block_desc: RenderDescriptor {
                 name: "block",

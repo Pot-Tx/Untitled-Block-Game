@@ -51,6 +51,7 @@ impl Camera {
 
     pub fn transform(
         &mut self,
+	    canvas: &Canvas,
         pos: &Position,
         rot: &Rotation,
         vel: &Velocity,
@@ -58,20 +59,15 @@ impl Camera {
     ) {
         let pos = pos.0 - vel.0 * (1.0 - partial_tick.0);
         let rot = rot.0;
-        let aspect;
+	    let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
 
         let trans = Mat4::translation(-pos[0], -pos[1], -pos[2]);
         let rot = Mat4::rotation(-rot[0], -rot[1], -rot[2]);
-
-        {
-            let canvas = CANVAS.read().unwrap();
-            aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
-            let proj = Mat4::projection(self.near, self.far, self.fov, aspect);
-            let mat = proj * rot * trans;
-
-            let queue = &canvas.queue;
-            queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[mat]));
-        }
+	    let proj = Mat4::projection(self.near, self.far, self.fov, aspect);
+	    
+	    let mat = proj * rot * trans;
+	    let queue = &canvas.queue;
+	    queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[mat]));
 
         let dy = self.far * (self.fov / 2.0).tan();
         let dx = dy * aspect;
@@ -120,14 +116,14 @@ impl System for CameraTransformer {
         CompRead<Rotation>,
         CompRead<Velocity>,
     );
-    type ResQuery = (ResWrite<Camera>, ResRead<PartialTick>);
+	type ResQuery = (ResRead<Canvas>, ResWrite<Camera>, ResRead<PartialTick>);
 
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        res.0.transform(entry.2, entry.3, entry.4, res.1);
+	    res.1.transform(res.0, entry.2, entry.3, entry.4, res.2);
 
         None
     }

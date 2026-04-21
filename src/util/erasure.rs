@@ -1,6 +1,7 @@
 use crate::util::collection::{SparseSet, SparseSetIter};
 use crate::util::Id;
 use std::alloc::Layout;
+use std::cell::UnsafeCell;
 use std::collections::{hash_map, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
@@ -11,13 +12,11 @@ pub struct ErasedBox {
     layout: Layout,
     drop: Option<fn(*mut u8)>,
 }
-unsafe impl Sync for ErasedBox {}
-unsafe impl Send for ErasedBox {}
 
 pub struct ErasedVec {
-    data: Vec<u8>,
+    data: UnsafeCell<Vec<u8>>,
     layout: Layout,
-    len: usize,
+    len: *mut usize,
     drop: Option<fn(*mut u8)>,
 }
 
@@ -39,7 +38,7 @@ pub struct ErasedDenseMapIter<'a, T> {
 
 pub struct ErasedDenseMapIterMut<'a, T> {
     id_iter: SparseSetIter<'a>,
-    items: &'a mut ErasedVec,
+    items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
 
@@ -51,9 +50,13 @@ pub struct ErasedHashMapIter<'a, T> {
 
 pub struct ErasedHashMapIterMut<'a, T> {
     id_iter: hash_map::Iter<'a, Id, Id>,
-    items: &'a mut ErasedVec,
+    items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
+
+unsafe impl Sync for ErasedBox {}
+
+unsafe impl Send for ErasedBox {}
 
 impl Drop for ErasedBox {
     #[inline]
@@ -97,7 +100,7 @@ impl ErasedBox {
     }
 
     #[inline]
-    pub fn cast_mut<T: 'static>(&mut self) -> &mut T {
+    pub fn cast_mut<T: 'static>(&self) -> &mut T {
         assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &mut *(self.ptr as *mut T) }
     }
@@ -112,16 +115,25 @@ impl Drop for ErasedVec {
     #[inline]
     fn drop(&mut self) {
         self.clear();
+        unsafe {
+            ptr::drop_in_place(self.len);
+        }
     }
 }
 
 impl ErasedVec {
     #[inline]
     pub fn new<T>() -> Self {
+        let len = unsafe { alloc::alloc(Layout::new::<usize>()) } as *mut usize;
+        assert!(!len.is_null());
+        unsafe {
+            len.write(0);
+        }
+        
         Self {
-            data: Vec::new(),
+            data: UnsafeCell::new(Vec::new()),
             layout: Layout::new::<T>(),
-            len: 0,
+            len,
             drop: if mem::needs_drop::<T>() {
                 Some(|p| unsafe {
                     ptr::drop_in_place(p as *mut T);
@@ -131,31 +143,40 @@ impl ErasedVec {
             },
         }
     }
-
+    
     #[inline]
-    fn reserve(&mut self, additional: usize) {
-        self.data.reserve(additional * self.layout.size());
-    }
-
-    #[inline]
-    fn set_len(&mut self, new_len: usize) {
-        assert!(new_len * self.layout.size() <= self.data.capacity());
+    const fn len(&self) -> usize {
         unsafe {
-            self.data.set_len(new_len * self.layout.size());
+            *self.len
         }
-        self.len = new_len;
     }
 
     #[inline]
-    fn get_ptr<T>(&self, idx: usize) -> *const T {
-        let offset = idx * self.layout.size();
-        unsafe { self.data.as_ptr().add(offset) as *const T }
+    fn reserve(&self, additional: usize) {
+        unsafe {
+            (&mut *self.data.get()).reserve(additional * self.layout.size());
+        }
     }
 
     #[inline]
-    fn get_mut_ptr<T>(&mut self, idx: usize) -> *mut T {
+    fn set_len(&self, new_len: usize) {
+        unsafe {
+            assert!(new_len * self.layout.size() <= (&*self.data.get()).capacity());
+            (&mut *self.data.get()).set_len(new_len * self.layout.size());
+            *self.len = new_len;
+        }
+    }
+
+    #[inline]
+    const fn get_ptr<T>(&self, idx: usize) -> *const T {
         let offset = idx * self.layout.size();
-        unsafe { self.data.as_mut_ptr().add(offset) as *mut T }
+        unsafe { (*self.data.get()).as_ptr().add(offset) as *const T }
+    }
+
+    #[inline]
+    const fn get_mut_ptr<T>(&self, idx: usize) -> *mut T {
+        let offset = idx * self.layout.size();
+        unsafe { (*self.data.get()).as_mut_ptr().add(offset) as *mut T }
     }
 
     #[inline]
@@ -165,7 +186,7 @@ impl ErasedVec {
     }
 
     #[inline]
-    pub fn get_mut<T>(&mut self, idx: usize) -> &mut T {
+    pub fn get_mut<T>(&self, idx: usize) -> &mut T {
         assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &mut *self.get_mut_ptr(idx) }
     }
@@ -173,15 +194,15 @@ impl ErasedVec {
     #[inline]
     pub fn insert<T>(&mut self, idx: usize, item: T) {
         assert_eq!(self.layout, Layout::new::<T>());
-        assert!(idx <= self.len);
+        assert!(idx <= self.len());
         self.reserve(1);
         unsafe {
             let ptr = self.get_mut_ptr::<T>(idx);
-            if idx < self.len {
-                ptr::copy(ptr, ptr.add(1), self.len - idx);
+            if idx < self.len() {
+                ptr::copy(ptr, ptr.add(1), self.len() - idx);
             }
             ptr.write(item);
-            self.set_len(self.len + 1);
+            self.set_len(self.len() + 1);
         }
     }
 
@@ -190,9 +211,9 @@ impl ErasedVec {
         assert_eq!(self.layout, Layout::new::<T>());
         self.reserve(1);
         unsafe {
-            let ptr = self.get_mut_ptr::<T>(self.len);
+            let ptr = self.get_mut_ptr::<T>(self.len());
             ptr.write(item);
-            self.set_len(self.len + 1);
+            self.set_len(self.len() + 1);
         }
     }
 
@@ -202,34 +223,34 @@ impl ErasedVec {
         self.reserve(1);
         let size = self.layout.size();
         unsafe {
-            let dst = self.data.as_mut_ptr().add(self.len * size);
+            let dst = self.get_mut_ptr::<u8>(self.len());
             ptr::copy_nonoverlapping(item.ptr, dst, size);
             item.forget();
         }
-        self.set_len(self.len + 1);
+        self.set_len(self.len() + 1);
     }
 
     #[inline]
     pub fn swap_remove<T>(&mut self, idx: usize) -> T {
         assert_eq!(self.layout, Layout::new::<T>());
-        assert!(idx < self.len);
+        assert!(idx < self.len());
         unsafe {
             let ptr = self.get_mut_ptr::<T>(idx);
             let value = ptr.read();
-            ptr::copy(self.get_mut_ptr(self.len - 1), ptr, 1);
-            self.set_len(self.len - 1);
+            ptr::copy(self.get_mut_ptr(self.len() - 1), ptr, 1);
+            self.set_len(self.len() - 1);
             value
         }
     }
 
     #[inline]
     pub fn swap_remove_and_drop(&mut self, idx: usize) {
-        assert!(idx < self.len);
-        let last = self.len - 1;
+        assert!(idx < self.len());
+        let last = self.len() - 1;
         let size = self.layout.size();
         unsafe {
-            let dst = self.data.as_mut_ptr().add(idx * size);
-            let src = self.data.as_ptr().add(last * size);
+            let dst = self.get_mut_ptr(idx);
+            let src = self.get_ptr(last);
             if let Some(drop) = self.drop {
                 drop(dst);
             }
@@ -237,18 +258,18 @@ impl ErasedVec {
                 ptr::copy_nonoverlapping(src, dst, size);
             }
         }
-        self.set_len(self.len - 1);
+        self.set_len(self.len() - 1);
     }
 
     #[inline]
     pub fn remove<T>(&mut self, idx: usize) -> T {
         assert_eq!(self.layout, Layout::new::<T>());
-        assert!(idx < self.len);
+        assert!(idx < self.len());
         unsafe {
             let ptr = self.get_mut_ptr::<T>(idx);
             let value = ptr.read();
-            ptr::copy(ptr.add(1), ptr, self.len - idx - 1);
-            self.set_len(self.len - 1);
+            ptr::copy(ptr.add(1), ptr, self.len() - idx - 1);
+            self.set_len(self.len() - 1);
             value
         }
     }
@@ -256,19 +277,19 @@ impl ErasedVec {
     #[inline]
     pub fn clear(&mut self) {
         if let Some(drop) = self.drop {
-            for i in 0..self.len {
+            for i in 0..self.len() {
                 let ptr = self.get_mut_ptr(i);
                 drop(ptr);
             }
         }
-        self.data.clear();
-        self.len = 0;
+        self.set_len(0);
+        unsafe { (&mut *self.data.get()).clear(); }
     }
 
     pub fn fmt<T: Debug>(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "BlobVec [ ")?;
         let ptr = self.get_ptr::<T>(0);
-        for i in 0..self.len {
+        for i in 0..self.len() {
             let item = unsafe { &*ptr.add(i) };
             write!(f, "{:?}, ", item)?;
         }
@@ -299,25 +320,25 @@ impl ErasedDenseMap {
     }
 
     #[inline]
-    pub fn get_mut<T>(&mut self, id: Id) -> Option<&mut T> {
+    pub fn get_mut<T>(&self, id: Id) -> Option<&mut T> {
         match self.ids.find(id) {
             Some(idx) => Some(self.items.get_mut(idx as usize)),
             None => None,
         }
     }
-
-    pub fn iter<T>(&'_ self) -> ErasedDenseMapIter<'_, T> {
+    
+    pub fn iter<T>(&self) -> ErasedDenseMapIter<'_, T> {
         ErasedDenseMapIter {
             id_iter: self.ids.iter(),
             items: &self.items,
             _marker: PhantomData,
         }
     }
-
-    pub fn iter_mut<T>(&'_ mut self) -> ErasedDenseMapIterMut<'_, T> {
+    
+    pub fn iter_mut<T>(&self) -> ErasedDenseMapIterMut<'_, T> {
         ErasedDenseMapIterMut {
             id_iter: self.ids.iter(),
-            items: &mut self.items,
+            items: &self.items,
             _marker: PhantomData,
         }
     }
@@ -327,7 +348,7 @@ impl ErasedDenseMap {
         match self.ids.find(id) {
             Some(idx) => Some(mem::replace(&mut self.items.get_mut(idx as usize), item)),
             None => {
-                let idx = self.items.len;
+                let idx = self.items.len();
                 self.ids.put(id, idx as Id);
                 self.items.push(item);
                 None
@@ -349,7 +370,7 @@ impl ErasedDenseMap {
                 item.forget();
             }
             None => {
-                let idx = self.items.len;
+                let idx = self.items.len();
                 self.ids.put(id, idx as Id);
                 self.items.push_erased(item);
             }
@@ -399,25 +420,25 @@ impl ErasedHashMap {
     }
 
     #[inline]
-    pub fn get_mut<T>(&mut self, id: Id) -> Option<&mut T> {
+    pub fn get_mut<T>(&self, id: Id) -> Option<&mut T> {
         match self.ids.get(&id) {
             Some(&idx) => Some(self.items.get_mut(idx as usize)),
             None => None,
         }
     }
-
-    pub fn iter<T>(&'_ self) -> ErasedHashMapIter<'_, T> {
+    
+    pub fn iter<T>(&self) -> ErasedHashMapIter<'_, T> {
         ErasedHashMapIter {
             id_iter: self.ids.iter(),
             items: &self.items,
             _marker: PhantomData,
         }
     }
-
-    pub fn iter_mut<T>(&'_ mut self) -> ErasedHashMapIterMut<'_, T> {
+    
+    pub fn iter_mut<T>(&self) -> ErasedHashMapIterMut<'_, T> {
         ErasedHashMapIterMut {
             id_iter: self.ids.iter(),
-            items: &mut self.items,
+            items: &self.items,
             _marker: PhantomData,
         }
     }
@@ -427,7 +448,7 @@ impl ErasedHashMap {
         match self.ids.get(&id) {
             Some(&idx) => Some(mem::replace(&mut self.items.get_mut(idx as usize), item)),
             None => {
-                let idx = self.items.len;
+                let idx = self.items.len();
                 self.ids.insert(id, idx as Id);
                 self.items.push(item);
                 None
@@ -449,7 +470,7 @@ impl ErasedHashMap {
                 item.forget();
             }
             None => {
-                let idx = self.items.len;
+                let idx = self.items.len();
                 self.ids.insert(id, idx as Id);
                 self.items.push_erased(item);
             }
@@ -464,7 +485,7 @@ impl ErasedHashMap {
                 if let Some((&id, _idx)) = self
                     .ids
                     .iter()
-                    .find(|(_id, idx)| **idx as usize + 1 == self.items.len)
+                    .find(|(_id, idx)| **idx as usize + 1 == self.items.len())
                 {
                     self.ids.insert(id, idx);
                 }
@@ -481,7 +502,7 @@ impl ErasedHashMap {
             if let Some((&id, _idx)) = self
                 .ids
                 .iter()
-                .find(|(_id, idx)| **idx as usize + 1 == self.items.len)
+                .find(|(_id, idx)| **idx as usize + 1 == self.items.len())
             {
                 self.ids.insert(id, idx);
             }
@@ -508,10 +529,7 @@ impl<'a, T: 'a> Iterator for ErasedDenseMapIterMut<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         let pos = self.id_iter.pos;
         match self.id_iter.next() {
-            Some(id) => {
-                let item = unsafe { &mut *self.items.get_mut_ptr(pos) };
-                Some((id, item))
-            }
+            Some(id) => Some((id, self.items.get_mut(pos))),
             None => None,
         }
     }
@@ -533,10 +551,7 @@ impl<'a, T: 'a> Iterator for ErasedHashMapIterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.id_iter.next() {
-            Some((&id, &idx)) => {
-                let item = unsafe { &mut *self.items.get_mut_ptr(idx as usize) };
-                Some((id, item))
-            }
+            Some((&id, &idx)) => Some((id, self.items.get_mut(idx as usize))),
             None => None,
         }
     }

@@ -8,10 +8,8 @@ mod vertex;
 
 use crate::ecs::*;
 use crate::resources;
-use crate::util::OnceInit;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
-use std::sync::RwLock;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
@@ -22,8 +20,6 @@ pub use canvas::*;
 pub use mesh::*;
 pub use texture::*;
 pub use vertex::*;
-
-pub static CANVAS: OnceInit<RwLock<Canvas>> = OnceInit::new();
 
 resources! {
     pub struct PartialTick(f32);

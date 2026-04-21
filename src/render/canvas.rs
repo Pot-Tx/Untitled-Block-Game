@@ -1,7 +1,5 @@
 use crate::ecs::*;
-use crate::render::CANVAS;
 use glam::{f32, u32};
-use std::sync::Arc;
 use wgpu::CurrentSurfaceTexture::Success;
 use wgpu::*;
 use winit::dpi::PhysicalSize;
@@ -32,16 +30,16 @@ pub struct Canvas {
     depth: Texture,
 }
 
-unsafe impl Sync for Canvas {}
+impl Resource for Canvas {}
 
 impl Canvas {
-    pub async fn new(window: &Arc<Window>) -> Self {
+    pub async fn new(window: &'static Window) -> Self {
         let wgpu_instance = Instance::default();
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
-
-        let surface = wgpu_instance.create_surface(window.clone()).unwrap();
+        
+        let surface = wgpu_instance.create_surface(window).unwrap();
         let adapter = wgpu_instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::default(),
@@ -193,15 +191,14 @@ pub struct RenderFinisher;
 
 impl System for RenderStarter {
     type CompQuery = ();
-    type ResQuery = ResWrite<Option<Frame>>;
+    type ResQuery = (ResRead<Canvas>, ResWrite<Option<Frame>>);
 
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
-        let canvas = CANVAS.read().unwrap();
-        res.replace(canvas.begin());
+        res.1.replace(res.0.begin());
 
         None
     }
@@ -209,15 +206,14 @@ impl System for RenderStarter {
 
 impl System for RenderFinisher {
     type CompQuery = ();
-    type ResQuery = ResWrite<Option<Frame>>;
+    type ResQuery = (ResRead<Canvas>, ResWrite<Option<Frame>>);
 
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
-        let canvas = CANVAS.read().unwrap();
-        canvas.end(res.take()?);
+        res.0.end(res.1.take().expect("Failed to finish rendering. Make sure to use Canvas::begin first!"));
 
         None
     }

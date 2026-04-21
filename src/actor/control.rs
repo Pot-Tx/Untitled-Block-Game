@@ -1,4 +1,5 @@
 use crate::actor::*;
+use crate::components;
 use crate::ecs::*;
 use crate::game::*;
 use crate::render::*;
@@ -6,7 +7,6 @@ use crate::util::bounding::{AABBGroup, Ray};
 use crate::util::coord::Direction;
 use crate::util::Id;
 use crate::world::{Block, BlockPos, Generate, World};
-use crate::components;
 use glam::Vec3;
 use std::marker::PhantomData;
 use wgpu::{LoadOp, PrimitiveTopology};
@@ -115,33 +115,35 @@ impl System for PlayerController {
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        let mut dir = Vec3::ZERO;
-
-        if res.is_action_present(0) {
-            dir.z += 1.0;
+        if res.cursor_grabbed {
+            let mut dir = Vec3::ZERO;
+            
+            if res.is_action_present(1) {
+                dir.z += 1.0;
+            }
+            
+            if res.is_action_present(2) {
+                dir.x -= 1.0;
+            }
+            
+            if res.is_action_present(3) {
+                dir.z -= 1.0;
+            }
+            
+            if res.is_action_present(4) {
+                dir.x += 1.0;
+            }
+            
+            if res.is_action_present(5) {
+                dir.y += 1.0;
+            }
+            
+            if res.is_action_present(6) {
+                dir.y -= 1.0;
+            }
+            
+            entry.2.accelerate(entry.3, entry.4, dir);
         }
-
-        if res.is_action_present(1) {
-            dir.x -= 1.0;
-        }
-
-        if res.is_action_present(2) {
-            dir.z -= 1.0;
-        }
-
-        if res.is_action_present(3) {
-            dir.x += 1.0;
-        }
-
-        if res.is_action_present(4) {
-            dir.y += 1.0;
-        }
-
-        if res.is_action_present(5) {
-            dir.y -= 1.0;
-        }
-
-        entry.2.accelerate(entry.3, entry.4, dir);
 
         None
     }
@@ -156,7 +158,9 @@ impl System for PlayerRotator {
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        entry.2.rotate(res.mouse_motion * *MOUSE_SENSITIVITY);
+        if res.cursor_grabbed {
+            entry.2.rotate(res.mouse_motion * *MOUSE_SENSITIVITY);
+        }
 
         None
     }
@@ -168,7 +172,7 @@ impl<G: Generate> System for Selector<G> {
         CompRead<Position>,
         CompRead<Rotation>,
     );
-    type ResQuery = ResRead<World<G>>;
+    type ResQuery = (ResRead<Canvas>, ResRead<World<G>>);
 
     fn operate(
         &mut self,
@@ -180,22 +184,20 @@ impl<G: Generate> System for Selector<G> {
             direction: entry.3.direction(),
         };
         
-        if let Some(item) = ray.traverse(res, 8.0) {
-            let canvas = CANVAS.read().unwrap();
-            
+        if let Some(item) = ray.traverse(res.1, 8.0) {
             if let Some(selection) = entry.1 {
                 let (g, i) = selection.item.update(&item);
                 if g {
-                    selection.geometry = item.mesh().geometry(&canvas, "selection");
+                    selection.geometry = item.mesh().geometry(res.0, "selection");
                 }
                 if i {
-                    selection.instance = [item.inst()].instances(&canvas, "selection");
+                    selection.instance = [item.inst()].instances(res.0, "selection");
                 }
                 
                 selection.item = item;
             } else {
-                let geometry = item.mesh().geometry(&canvas, "selection");
-                let instance = [item.inst()].instances(&canvas, "selection");
+                let geometry = item.mesh().geometry(res.0, "selection");
+                let instance = [item.inst()].instances(res.0, "selection");
                 
                 entry.1.replace(Selection { item, geometry, instance });
             }
@@ -229,9 +231,7 @@ impl System for SelectionRenderer {
 }
 
 impl SelectionRenderer {
-    pub fn new() -> Self {
-        let canvas = CANVAS.read().unwrap();
-        
+    pub fn new(canvas: &Canvas) -> Self {
         Self {
             desc: RenderDescriptor {
                 name: "selection",

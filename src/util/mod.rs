@@ -120,6 +120,10 @@ impl<T> OnceInit<T> {
             inner: OnceLock::new(),
         }
     }
+    
+    pub fn ready(&self) -> bool {
+        self.inner.get().is_some()
+    }
 
     pub fn init(&self, value: T) {
         if self.inner.set(value).is_err() {

@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::render::Canvas;
 pub use block::*;
 pub use generation::*;
 pub use meshing::*;
@@ -242,6 +243,7 @@ pub struct WorldUpdater<G: Generate>(pub PhantomData<G>);
 impl<G: Generate> System for WorldUpdater<G> {
     type CompQuery = (CompRead<PlayerControlled>, CompRead<Position>);
     type ResQuery = (
+	    ResRead<Canvas>,
         ResWrite<World<G>>,
         ResWrite<RenderedWorld>,
         ResRead<WorldThreads>,
@@ -254,9 +256,9 @@ impl<G: Generate> System for WorldUpdater<G> {
     ) -> Option<Vec<Command>> {
         let pos = entry.2.0.floor().as_ivec3();
         let center = pos.div_euclid(IVec3::splat(REGION_SIZE as i32));
-
-        res.0.update(center, res.2);
-        res.1.update(center);
+	    
+	    res.1.update(center, res.3);
+	    res.2.update(res.0, center);
 
         None
     }

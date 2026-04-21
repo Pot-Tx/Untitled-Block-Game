@@ -50,7 +50,7 @@ pub struct RenderedWorld {
 impl Resource for RenderedWorld {}
 
 impl RenderedWorld {
-    const MAX_REMOVE_COST: usize = 256;
+    const MAX_REMOVE_COST: usize = 32;
 
     pub fn new(radius: u32, meshing_rx: Receiver<MeshingResult>) -> Self {
         Self {
@@ -64,34 +64,7 @@ impl RenderedWorld {
         }
     }
 	
-	pub fn update(&mut self, canvas: &Canvas, center: RegionPos) {
-		while let Ok(result) = self.meshing_rx.try_recv() {
-			let pos = result.pos;
-			
-			if ((pos - self.center).abs().element_sum() as u32) >= self.radius {
-				continue;
-			}
-			
-			if let Some(region) = self.regions.get_mut(&pos) {
-				region.update(&canvas, result);
-			} else {
-				let is_far = result.chunk_pos.is_none();
-				let mut region = RenderedRegion::new(pos, is_far);
-				region.update(&canvas, result);
-				self.regions.insert(pos, region);
-			}
-			
-			self.active_regions.insert(pos);
-        }
-
-        self.active_regions.retain(|pos| {
-            if let Some(region) = self.regions.get_mut(pos) {
-                !region.poll()
-            } else {
-                false
-            }
-        });
-
+	pub fn update(&mut self, center: RegionPos) {
         let center_displacement = (center - self.center).abs().element_sum() as u32;
         self.center = center;
         let remove_radius = (self.remove_iter.radius as u32).saturating_add(center_displacement);
@@ -125,6 +98,35 @@ impl RenderedWorld {
             self.regions.clear();
             self.remove_iter = L1ShellIter::new(center, self.radius as i32 - 1);
         }
+    }
+    
+    pub fn pre_render(&mut self, canvas: &Canvas) {
+        while let Ok(result) = self.meshing_rx.try_recv() {
+            let pos = result.pos;
+            
+            if ((pos - self.center).abs().element_sum() as u32) >= self.radius {
+                continue;
+            }
+            
+            if let Some(region) = self.regions.get_mut(&pos) {
+                region.update(canvas, result);
+            } else {
+                let is_far = result.chunk_pos.is_none();
+                let mut region = RenderedRegion::new(pos, is_far);
+                region.update(canvas, result);
+                self.regions.insert(pos, region);
+            }
+            
+            self.active_regions.insert(pos);
+        }
+        
+        self.active_regions.retain(|pos| {
+            if let Some(region) = self.regions.get_mut(pos) {
+                !region.poll()
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -325,10 +327,11 @@ impl System for WorldRenderer {
         CompRead<Rotation>,
     );
     type ResQuery = (
+        ResRead<Canvas>,
         ResWrite<Option<Frame>>,
         ResRead<BlockTextures>,
         ResRead<Camera>,
-        ResRead<RenderedWorld>,
+        ResWrite<RenderedWorld>,
     );
 
     fn operate(
@@ -336,14 +339,16 @@ impl System for WorldRenderer {
         _: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        let mut regions = res.3.regions.values().collect::<Vec<_>>();
-        regions.retain(|&region| res.2.frustum.is_aabb_inside(region.bound()));
+        res.4.pre_render(res.0);
+        
+        let mut regions = res.4.regions.values().collect::<Vec<_>>();
+        regions.retain(|&region| res.3.frustum.is_aabb_inside(region.bound()));
 
-        if let Some(frame) = res.0 {
+        if let Some(frame) = res.1 {
             frame.render(&self.block_desc, |mut pass| {
                 self.block_batch.begin(&mut pass);
                 self.block_batch
-                    .push(&mut pass, (&res.1.0, &res.2.transform));
+                    .push(&mut pass, (&res.2.0, &res.3.transform));
 
                 regions.iter().for_each(|&region| {
                     self.block_batch.draw(&mut pass, region);
@@ -352,7 +357,7 @@ impl System for WorldRenderer {
 
             frame.render(&self.occlusion_desc, |mut pass| {
                 self.occlusion_batch.begin(&mut pass);
-                self.occlusion_batch.push(&mut pass, &res.2.transform);
+                self.occlusion_batch.push(&mut pass, &res.3.transform);
 
                 regions.iter().for_each(|&region| {
                     self.occlusion_batch.draw(&mut pass, region);
@@ -378,7 +383,7 @@ impl WorldRenderer {
                 depth_load: LoadOp::Clear(0.0),
             },
             block_batch: RenderBatch::new(
-                &canvas,
+                canvas,
                 &RenderBatchConfig {
                     name: "block",
                     shader: "block",
@@ -394,7 +399,7 @@ impl WorldRenderer {
                 depth_load: LoadOp::Load,
             },
             occlusion_batch: RenderBatch::new(
-                &canvas,
+                canvas,
                 &RenderBatchConfig {
                     name: "occlusion",
                     shader: "occlusion",

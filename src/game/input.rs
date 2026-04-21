@@ -45,6 +45,14 @@ fn build_input_map() -> Registry<Input> {
         button: InputButton::Key(KeyCode::ShiftLeft),
         input_type: InputType::Pressed,
     };
+    let attack = Input {
+        button: InputButton::Mouse(MouseButton::Left),
+        input_type: InputType::JustPressed,
+    };
+    let interact = Input {
+        button: InputButton::Mouse(MouseButton::Right),
+        input_type: InputType::JustPressed,
+    };
     
     input_map.register(0, escape);
     input_map.register(1, forward);
@@ -53,6 +61,8 @@ fn build_input_map() -> Registry<Input> {
     input_map.register(4, right);
     input_map.register(5, ascend);
     input_map.register(6, descend);
+    input_map.register(7, attack);
+    input_map.register(8, interact);
 
     input_map
 }

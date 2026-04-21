@@ -9,7 +9,7 @@ use crate::ecs::*;
 use crate::resources;
 use crate::util::math::L1ShellIter;
 use crossbeam_channel::Sender;
-use glam::IVec3;
+use glam::{IVec3, U8Vec3};
 use rayon::ThreadPool;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
@@ -82,15 +82,40 @@ impl<G: Generate> World<G> {
     }
 
     #[inline]
-    pub fn traverse_block_pos(pos: BlockPos) -> (RegionPos, RelBlockPos) {
+    pub fn cast_pos(pos: BlockPos) -> (RegionPos, RelBlockPos) {
         let region_size = IVec3::splat(REGION_SIZE as i32);
         let region_pos = pos.div_euclid(region_size);
         let rel_block_pos = pos.rem_euclid(region_size).as_u8vec3();
         (region_pos, rel_block_pos)
     }
+    
+    #[inline]
+    fn pos_influence(pos: BlockPos) -> SmallVec<[RegionPos; 8]> {
+        let mut influenced = SmallVec::new();
+        
+        fn range(b: i32) -> (i32, i32) {
+            let min = (b - 1).div_euclid(REGION_SIZE as i32);
+            let max = (b + 1).div_euclid(REGION_SIZE as i32);
+            (min, max)
+        }
+        
+        let (minx, maxx) = range(pos.x);
+        let (miny, maxy) = range(pos.y);
+        let (minz, maxz) = range(pos.z);
+        
+        for x in minx..=maxx {
+            for y in miny..=maxy {
+                for z in minz..=maxz {
+                    influenced.push(RegionPos::new(x, y, z));
+                }
+            }
+        }
+        
+        influenced
+    }
 
     pub fn get_block(&self, pos: BlockPos) -> Block {
-        let (region_pos, rel_block_pos) = Self::traverse_block_pos(pos);
+        let (region_pos, rel_block_pos) = Self::cast_pos(pos);
         if let Some(region) = self.regions.get(&region_pos) {
             region.get_block(rel_block_pos)
         } else {
@@ -99,9 +124,17 @@ impl<G: Generate> World<G> {
     }
 
     pub fn set_block(&mut self, pos: BlockPos, block: Block) {
-        let (region_pos, rel_block_pos) = Self::traverse_block_pos(pos);
-        if let Some(region) = self.regions.get_mut(&region_pos) {
-            region.set_block(rel_block_pos, block);
+        let (region_pos, rel_block_pos) = Self::cast_pos(pos);
+        for influenced_region_pos in Self::pos_influence(pos) {
+            if let Some(region) = self.regions.get_mut(&influenced_region_pos) {
+                let pos = (
+                    rel_block_pos.as_i16vec3() + (region_pos - influenced_region_pos).as_i16vec3() * REGION_SIZE as i16 + 1
+                )
+                    .as_u8vec3();
+                if region.set_block(pos, block) {
+                    self.active_regions.insert(influenced_region_pos);
+                }
+            }
         }
     }
 
@@ -242,12 +275,7 @@ pub struct WorldUpdater<G: Generate>(pub PhantomData<G>);
 
 impl<G: Generate> System for WorldUpdater<G> {
     type CompQuery = (CompRead<PlayerControlled>, CompRead<Position>);
-    type ResQuery = (
-	    ResRead<Canvas>,
-        ResWrite<World<G>>,
-        ResWrite<RenderedWorld>,
-        ResRead<WorldThreads>,
-    );
+    type ResQuery = (ResWrite<World<G>>, ResWrite<RenderedWorld>, ResRead<WorldThreads>);
 
     fn operate(
         &mut self,
@@ -256,9 +284,9 @@ impl<G: Generate> System for WorldUpdater<G> {
     ) -> Option<Vec<Command>> {
         let pos = entry.2.0.floor().as_ivec3();
         let center = pos.div_euclid(IVec3::splat(REGION_SIZE as i32));
-	    
-	    res.1.update(center, res.3);
-	    res.2.update(res.0, center);
+        
+        res.0.update(center, res.2);
+        res.1.update(center);
 
         None
     }

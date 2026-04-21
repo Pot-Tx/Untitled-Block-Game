@@ -19,6 +19,7 @@ fn build_block_types() -> Registry<BlockType> {
         model_idx_of_state: |_| -> usize { 0 },
         bounds_idx_of_state: |_| -> usize { 0 },
         opacity: Vec3::ZERO,
+        default_state: 0,
     };
 
     let bricks = BlockType {
@@ -52,6 +53,7 @@ fn build_block_types() -> Registry<BlockType> {
         model_idx_of_state: |_| -> usize { 0 },
         bounds_idx_of_state: |_| -> usize { 0 },
         opacity: Vec3::ONE,
+        default_state: 0,
     };
 
     block_types.register(0, air);
@@ -69,6 +71,7 @@ pub struct BlockType {
     pub model_idx_of_state: fn(State) -> usize,
     pub bounds_idx_of_state: fn(State) -> usize,
     pub opacity: Vec3,
+    pub default_state: State,
 }
 
 #[derive(Copy, Clone)]
@@ -106,7 +109,18 @@ impl Debug for Block {
 impl Block {
     #[inline]
     pub fn air() -> Self {
-        Self::from_meta(0)
+        Self::default_of(0)
+    }
+    
+    #[inline]
+    pub fn default_of(type_id: Id) -> Self {
+        let block_type = BLOCK_TYPES.get(type_id);
+        
+        Self {
+            type_id,
+            block_type,
+            state: block_type.default_state,
+        }
     }
 
     #[inline]

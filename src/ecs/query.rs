@@ -77,6 +77,11 @@ pub struct CompWrite<C: Component> {
     marker: PhantomData<C>,
 }
 
+pub struct Without<C: Component> {
+    comp: *const ErasedComponent,
+    marker: PhantomData<C>,
+}
+
 pub struct ResRead<R: Resource>(PhantomData<R>);
 
 pub struct ResWrite<R: Resource>(PhantomData<R>);
@@ -128,6 +133,33 @@ impl<C: Component> CompFetch for CompWrite<C> {
     
     fn iter(components: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         components.get::<C>().iter_mut()
+    }
+}
+
+impl<C: Component> CompFetch for Without<C> {
+    type Item<'a> = ();
+    
+    fn add_to(_: &mut Access) {}
+    
+    fn new(components: &ComponentManager) -> Self {
+        Self {
+            comp: components.get::<C>(),
+            marker: PhantomData,
+        }
+    }
+    
+    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+        unsafe {
+            if (&*self.comp).contains(entity) {
+                None
+            } else {
+                Some(())
+            }
+        }
+    }
+    
+    fn iter(_: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+        iter::empty()
     }
 }
 

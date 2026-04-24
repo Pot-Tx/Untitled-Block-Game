@@ -9,14 +9,13 @@ use crate::ecs::*;
 use crate::resources;
 use crate::util::math::L1ShellIter;
 use crossbeam_channel::Sender;
-use glam::{IVec3, U8Vec3};
+use glam::IVec3;
 use rayon::ThreadPool;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::render::Canvas;
 pub use block::*;
 pub use generation::*;
 pub use meshing::*;

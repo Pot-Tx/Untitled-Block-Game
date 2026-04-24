@@ -126,14 +126,15 @@ impl GameClient {
 
         simulation.systems.register(0, PlayerController);
         simulation.systems.register(1, Translator);
-        simulation.systems.register(2, Friction);
+        simulation.systems.register(2, Collider);
+        simulation.systems.register(3, Friction);
         simulation
             .systems
-            .register(3, Selector::<TestGen>(PhantomData));
+            .register(4, Selector::<TestGen>(PhantomData));
         simulation
             .systems
-            .register(4, WorldUpdater(PhantomData::<TestGen>));
-        simulation.systems.register(5, ChunkMeshing);
+            .register(5, WorldUpdater(PhantomData::<TestGen>));
+        simulation.systems.register(6, ChunkMeshing);
 
         simulation.resources.register(InputState::new());
         let near_threads = ThreadPoolBuilder::new()

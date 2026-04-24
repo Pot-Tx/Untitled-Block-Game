@@ -4,6 +4,8 @@ use crate::components;
 use crate::ecs::*;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
+use crate::util::coord::{Axis, Coord3};
+use crate::world::{BlockPos, TestGen, World};
 pub use control::*;
 use glam::{Vec2, Vec3};
 use std::f32::consts::FRAC_PI_2;
@@ -100,18 +102,93 @@ impl Velocity {
 
 pub struct Translator;
 
+pub struct Collider;
+
 pub struct Friction;
 
 impl System for Translator {
-    type CompQuery = (CompWrite<Position>, CompRead<Velocity>);
+    type CompQuery = (CompWrite<Position>, CompRead<Velocity>, Without<Bound>);
     type ResQuery = ();
-
-    fn operate<'a>(
+    
+    fn operate(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'a>,
-        _: &mut <Self::ResQuery as ResQuery>::Item<'a>,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        _: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         entry.1.translate(entry.2);
+        
+        None
+    }
+}
+
+impl System for Collider {
+    type CompQuery = (CompWrite<Position>, CompWrite<Velocity>, CompRead<Bound>);
+    type ResQuery = ResRead<World<TestGen>>;
+    
+    fn operate(
+        &mut self,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
+    ) -> Option<Vec<Command>> {
+        for &axis in Axis::ALL {
+            let vel = entry.2.0.get(axis);
+            entry.1.0 = entry.1.0.shift(axis, vel);
+            let bound = entry.3.0.translate(entry.1.0);
+            
+            let [(minx, maxx), (miny, maxy), (minz, maxz)] = Axis::ALL.map(|a| {
+                if a == axis {
+                    if vel < 0.0 {
+                        (bound.min.get(a).floor() as i32, bound.min.get(a).ceil() as i32)
+                    } else {
+                        (bound.max.get(a).floor() as i32, bound.max.get(a).ceil() as i32)
+                    }
+                } else {
+                    (bound.min.get(a).floor() as i32, bound.max.get(a).ceil() as i32)
+                }
+            });
+            
+            let mut depth = 0.0;
+            
+            for x in minx..maxx {
+                for y in miny..maxy {
+                    for z in minz..maxz {
+                        let pos = BlockPos::new(x, y, z);
+                        let block = res.get_block(pos);
+                        let block_bounds = block.bounds();
+                        
+                        let d = block_bounds.iter().map(|&b| {
+                            let block_bound = b.translate(pos.as_vec3());
+                            if bound.intersects_with(block_bound) {
+                                if vel < 0.0 {
+                                    block_bound.max.get(axis) - bound.min.get(axis)
+                                } else {
+                                    bound.max.get(axis) - block_bound.min.get(axis)
+                                }
+                            } else {
+                                0.0
+                            }
+                        })
+                            .reduce(f32::max)
+                            .unwrap_or(0.0)
+                            .max(0.0);
+                        
+                        if d > depth {
+                            depth = d;
+                        }
+                    }
+                }
+            }
+            
+            if depth > 0.0 {
+                if vel > 0.0 {
+                    depth = -depth;
+                }
+                
+                entry.1.0 = entry.1.0.shift(axis, depth);
+                entry.2.0 = entry.2.0.with(axis, 0.0);
+            }
+        }
+        
         None
     }
 }
@@ -119,13 +196,14 @@ impl System for Translator {
 impl System for Friction {
     type CompQuery = CompWrite<Velocity>;
     type ResQuery = ();
-
-    fn operate<'a>(
+    
+    fn operate(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'a>,
-        _: &mut <Self::ResQuery as ResQuery>::Item<'a>,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        _: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         entry.1.0 *= 0.5;
+        
         None
     }
 }

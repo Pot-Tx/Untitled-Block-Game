@@ -8,23 +8,24 @@ use crate::actor::{PlayerControlled, Position};
 use crate::ecs::*;
 use crate::resources;
 use crate::util::math::L1ShellIter;
+pub use block::*;
 use crossbeam_channel::Sender;
+pub use generation::*;
 use glam::IVec3;
+pub use meshing::*;
 use rayon::ThreadPool;
+pub use region::*;
+pub use render::*;
 use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
-use std::sync::Arc;
-
-pub use block::*;
-pub use generation::*;
-pub use meshing::*;
-pub use region::*;
-pub use render::*;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 pub type RegionPos = IVec3;
 pub type BlockPos = IVec3;
 const DETAIL_LEVELS: usize = 8;
+static SAVE_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_mins(5));
 
 pub struct World<G: Generate> {
     center: RegionPos,
@@ -33,6 +34,8 @@ pub struct World<G: Generate> {
     update_iters: SmallVec<[L1ShellIter<RegionPos>; 10]>,
     regions: HashMap<RegionPos, Region<G>>,
     active_regions: HashSet<RegionPos>,
+    changed_regions: HashSet<RegionPos>,
+    save_timer: Instant,
     generator: Arc<G>,
 
     meshing_tx: Sender<MeshingTask>,
@@ -74,6 +77,8 @@ impl<G: Generate> World<G> {
             update_iters,
             regions: HashMap::new(),
             active_regions: HashSet::new(),
+            changed_regions: HashSet::new(),
+            save_timer: Instant::now(),
             generator: Arc::new(generator),
 
             meshing_tx,
@@ -132,6 +137,7 @@ impl<G: Generate> World<G> {
                     .as_u8vec3();
                 if region.set_block(pos, block) {
                     self.active_regions.insert(influenced_region_pos);
+                    self.changed_regions.insert(influenced_region_pos);
                 }
             }
         }
@@ -229,7 +235,10 @@ impl<G: Generate> World<G> {
                                 cost += complex;
                             }
                         } else {
-                            self.regions.remove(&pos);
+                            if let Some(region) = self.regions.get_mut(&pos) {
+                                region.save();
+                                self.regions.remove(&pos);
+                            }
                             cost += 1;
                         }
                     }
@@ -252,7 +261,7 @@ impl<G: Generate> World<G> {
 
         self.active_regions.retain(|pos| {
             if let Some(region) = self.regions.get_mut(pos) {
-                let threads = if region.is_near() {
+                let threads = if region.is_vec() {
                     near_threads
                 } else {
                     far_threads
@@ -263,6 +272,20 @@ impl<G: Generate> World<G> {
                 false
             }
         });
+        
+        if self.save_timer.elapsed() >= *SAVE_DURATION {
+            self.save_timer = Instant::now();
+            
+            self.save();
+        }
+    }
+    
+    pub fn save(&mut self) {
+        for pos in self.changed_regions.drain() {
+            if let Some(region) = self.regions.get_mut(&pos) {
+                region.save();
+            }
+        }
     }
 }
 

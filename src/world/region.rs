@@ -5,17 +5,20 @@ use crate::world::block::Meta;
 use crate::world::generation::*;
 use crate::world::meshing::MeshingTask;
 use crate::world::{Block, BlockPos, RegionPos};
+use anyhow::{Error, Result};
 use crossbeam_channel::*;
 use glam::U8Vec3;
 use log::error;
 use rayon::ThreadPool;
-use std::array;
+use smallvec::SmallVec;
 use std::collections::HashSet;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
-use smallvec::SmallVec;
+use std::{array, io};
 
 pub type Chunk = CubicVec<Meta>;
 pub type RelBlockPos = U8Vec3;
@@ -391,6 +394,8 @@ pub struct RegionContext<G: Generate> {
 pub struct VecMode {
     pub blocks: Arc<RwLock<CubicVec<Meta>>>,
     dirty_chunks: HashSet<ChunkPos>,
+    touched: bool,
+    changed: bool,
 
     gen_rx: Option<Receiver<GenResultBatch<Area>>>,
 }
@@ -445,8 +450,8 @@ impl<G: Generate> Region<G> {
 
     pub fn update(&mut self, context: &RegionContext<G>, threads: &ThreadPool) -> bool {
         match &mut self.mode {
-            RegionMode::Vec(_) => {
-                if context.depths.is_none() {
+            RegionMode::Vec(mode) => {
+                if context.depths.is_none() || mode.touched {
                     false
                 } else {
                     self.mode = RegionMode::new(self.pos, context, threads);
@@ -529,15 +534,31 @@ impl<G: Generate> Region<G> {
 
         finished
     }
-
-    pub fn is_near(&self) -> bool {
+    
+    pub fn save(&mut self) {
+        match &mut self.mode {
+            RegionMode::Vec(mode) => {
+                if mode.changed {
+                    if mode.save(self.pos).is_err() {
+                        error!("Failed to save region at {}", self.pos);
+                    }
+                    
+                    mode.changed = false;
+                }
+            }
+            
+            RegionMode::Tree(_) => (),
+        }
+    }
+    
+    pub fn is_vec(&self) -> bool {
         match self.mode {
             RegionMode::Vec(_) => true,
             RegionMode::Tree(_) => false,
         }
     }
-
-    pub fn is_far(&self) -> bool {
+    
+    pub fn is_tree(&self) -> bool {
         match self.mode {
             RegionMode::Vec(_) => false,
             RegionMode::Tree(_) => true,
@@ -547,6 +568,10 @@ impl<G: Generate> Region<G> {
 
 impl<G: Generate> RegionMode<G> {
     fn new(pos: RegionPos, context: &RegionContext<G>, threads: &ThreadPool) -> Self {
+        if let Ok(mode) = VecMode::load(pos) {
+            return Self::Vec(mode);
+        }
+        
         match context.depths {
             Some((min_depth, max_depth)) => Self::Tree(TreeMode::new(
                 pos,
@@ -619,6 +644,8 @@ impl VecMode {
         let region = Self {
             blocks: Arc::new(RwLock::new(blocks)),
             dirty_chunks: HashSet::from(Self::CHUNK_POSES),
+            touched: false,
+            changed: false,
 
             gen_rx: Some(gen_rx),
         };
@@ -635,6 +662,96 @@ impl VecMode {
         region
     }
     
+    fn load(pos: RegionPos) -> Result<Self> {
+        let mut file = File::open(&format!("saves/{}.{}.{}.regn", pos.x, pos.y, pos.z))?;
+        
+        let mut magic_data = [0; 4];
+        file.read_exact(&mut magic_data)?;
+        let magic = str::from_utf8(&magic_data).unwrap_or("ERROR");
+        
+        let mut version_data = [0; 4];
+        file.read_exact(&mut version_data)?;
+        let version = u32::from_le_bytes(version_data);
+        
+        if magic != "REGN" || version != 0 {
+            return Err(Error::from(io::Error::new(
+                io::ErrorKind::Other,
+                "Region file header is invalid",
+            )));
+        }
+        
+        let mut block_data = Vec::new();
+        file.read_to_end(&mut block_data)?;
+        
+        if block_data.len() % 4 != 0 {
+            return Err(Error::from(io::Error::new(
+                io::ErrorKind::Other,
+                "Region file is corrupted",
+            )));
+        }
+        
+        let mut blocks = Vec::new();
+        
+        for i in 0..block_data.len() / 4 {
+            let j = i * 4;
+            let meta = Meta::from_le_bytes(block_data[j..j + 2].try_into()?);
+            let count = u16::from_le_bytes(block_data[j + 2..j + 4].try_into()?);
+            blocks.resize(blocks.len() + count as usize, meta);
+        }
+        
+        let blocks = Chunk {
+            side: REGION_SIZE + 2,
+            vec: blocks,
+        };
+        
+        Ok(Self {
+            blocks: Arc::new(RwLock::new(blocks)),
+            dirty_chunks: HashSet::from(Self::CHUNK_POSES),
+            touched: true,
+            changed: false,
+            
+            gen_rx: None,
+        })
+    }
+    
+    fn save(&self, pos: RegionPos) -> Result<()> {
+        let mut file = File::create(&format!("saves/{}.{}.{}.regn", pos.x, pos.y, pos.z))?;
+        
+        file.write_all(b"REGN")?;
+        
+        file.write_all(&0u32.to_le_bytes())?;
+        
+        let mut block_data = Vec::new();
+        let mut meta = Meta::MAX;
+        let mut count: u16 = 0;
+        
+        let blocks = self.blocks.read().unwrap();
+        
+        for &m in blocks.vec.iter() {
+            if m == meta && count < u16::MAX {
+                count += 1;
+            } else {
+                if count > 0 {
+                    block_data.extend_from_slice(&meta.to_le_bytes());
+                    block_data.extend_from_slice(&count.to_le_bytes());
+                }
+                
+                meta = m;
+                count = 1;
+            }
+        }
+        
+        if count > 0 {
+            block_data.extend_from_slice(&meta.to_le_bytes());
+            block_data.extend_from_slice(&count.to_le_bytes());
+        }
+        
+        file.write_all(&block_data)?;
+        
+        file.sync_all()?;
+        Ok(())
+    }
+    
     fn get_block(&self, pos: RelBlockPos) -> Block {
         let blocks = self.blocks.read().unwrap();
         Block::from_meta(*blocks.get(pos + 1))
@@ -644,6 +761,8 @@ impl VecMode {
         let mut blocks = self.blocks.write().unwrap();
         blocks.set(pos, block.to_meta());
         self.dirty_chunks.extend(Self::pos_influence(pos));
+        self.touched = true;
+        self.changed = true;
     }
 
     fn poll_generation(&mut self) -> bool {

@@ -12,7 +12,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 
 pub static INPUT_MAP: LazyLock<Registry<Input>> = LazyLock::new(|| build_input_map());
-pub static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 64.0);
+pub static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 256.0);
 
 fn build_input_map() -> Registry<Input> {
     let mut input_map = Registry::new();
@@ -148,24 +148,6 @@ impl InputState {
         self.just_released_keys.clear();
         self.just_pressed_buttons.clear();
         self.just_released_buttons.clear();
-    }
-    
-    fn clear_action(&mut self, action_id: Id) {
-        let input = INPUT_MAP.get(action_id);
-        
-        match input.button {
-            InputButton::Key(key) => match input.input_type {
-                InputType::Pressed => self.pressed_keys.remove(&key),
-                InputType::JustPressed => self.just_pressed_keys.remove(&key),
-                InputType::JustReleased => self.just_released_keys.remove(&key),
-            },
-            
-            InputButton::Mouse(button) => match input.input_type {
-                InputType::Pressed => self.pressed_buttons.remove(&button),
-                InputType::JustPressed => self.just_pressed_buttons.remove(&button),
-                InputType::JustReleased => self.just_released_buttons.remove(&button),
-            },
-        };
     }
 
     #[inline]

@@ -1,11 +1,11 @@
-use std::fmt;
-use std::fmt::Debug;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
 use crate::world::meshing::BlockModel;
-use crate::world::TemplatedMesh;
+use crate::world::{BlockPos, TemplatedMesh};
 use glam::Vec3;
+use std::fmt;
+use std::fmt::Debug;
 use std::sync::LazyLock;
 
 pub static BLOCK_TYPES: LazyLock<Registry<BlockType>> = LazyLock::new(|| build_block_types());
@@ -163,8 +163,11 @@ impl Block {
     }
     
     #[inline]
-    pub fn bounds(&self) -> &[AABB<Vec3>] {
+    pub fn bounds(&self, pos: BlockPos) -> Vec<AABB<Vec3>> {
         let block_type = self.block_type;
-        &block_type.bounds[(block_type.bounds_idx_of_state)(self.state)]
+        block_type.bounds[(block_type.bounds_idx_of_state)(self.state)]
+            .iter()
+            .map(|b| b.translate(pos.as_vec3()))
+            .collect()
     }
 }

@@ -62,7 +62,7 @@ impl SelectedItem {
         match self {
             Self::Block { block, .. } => {
                 let bound = block
-                    .bounds()
+                    .bounds(BlockPos::ZERO)
                     .merge()
                     .expect("Selected Block doesn't have bounds");
                 Mesh::<BasicVertex>::frame(bound.min, bound.max)
@@ -212,7 +212,7 @@ impl<G: Generate> System for Selector<G> {
 }
 
 impl<G: Generate> System for Interactor<G> {
-    type CompQuery = (CompRead<PlayerControlled>, CompRead<Option<Selection>>);
+    type CompQuery = (CompRead<PlayerControlled>, CompRead<Option<Selection>>, CompRead<Position>, CompRead<Bound>);
     type ResQuery = (ResRead<InputState>, ResWrite<World<G>>);
     
     fn operate(
@@ -234,7 +234,12 @@ impl<G: Generate> System for Interactor<G> {
             if res.0.is_action_present(8) {
                 match selection.item {
                     SelectedItem::Block { pos, face, .. } => {
-                        res.1.set_block(pos.step(face), Block::default_of(1));
+                        let block = Block::default_of(1);
+                        let bound = entry.4.translate(entry.3);
+                        
+                        if block.bounds(pos.step(face)).into_iter().all(|b| !bound.intersects_with(b)) {
+                            res.1.set_block(pos.step(face), Block::default_of(1));
+                        }
                     }
                     
                     SelectedItem::Actor { .. } => (),

@@ -100,6 +100,13 @@ impl Velocity {
     }
 }
 
+impl Bound {
+    #[inline]
+    pub fn translate(&self, pos: &Position) -> AABB<Vec3> {
+        self.0.translate(pos.0)
+    }
+}
+
 pub struct Translator;
 
 pub struct Collider;
@@ -133,7 +140,7 @@ impl System for Collider {
         for &axis in Axis::ALL {
             let vel = entry.2.0.get(axis);
             entry.1.0 = entry.1.0.shift(axis, vel);
-            let bound = entry.3.0.translate(entry.1.0);
+            let bound = entry.3.translate(entry.1);
             
             let [(minx, maxx), (miny, maxy), (minz, maxz)] = Axis::ALL.map(|a| {
                 if a == axis {
@@ -154,15 +161,14 @@ impl System for Collider {
                     for z in minz..maxz {
                         let pos = BlockPos::new(x, y, z);
                         let block = res.get_block(pos);
-                        let block_bounds = block.bounds();
+                        let block_bounds = block.bounds(pos);
                         
-                        let d = block_bounds.iter().map(|&b| {
-                            let block_bound = b.translate(pos.as_vec3());
-                            if bound.intersects_with(block_bound) {
+                        let d = block_bounds.into_iter().map(|b| {
+                            if bound.intersects_with(b) {
                                 if vel < 0.0 {
-                                    block_bound.max.get(axis) - bound.min.get(axis)
+                                    b.max.get(axis) - bound.min.get(axis)
                                 } else {
-                                    bound.max.get(axis) - block_bound.min.get(axis)
+                                    bound.max.get(axis) - b.min.get(axis)
                                 }
                             } else {
                                 0.0

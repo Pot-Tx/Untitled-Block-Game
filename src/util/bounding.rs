@@ -1,9 +1,9 @@
+use crate::actor::SelectedItem;
 use crate::util::coord::{Axis, Coord, Coord3, FCoord, FCoord3};
+use crate::world::{Generate, World};
+use glam::{IVec3, Vec3};
 use num_traits::{FromPrimitive, Signed, Zero};
 use std::ops::Neg;
-use glam::{IVec3, Vec3};
-use crate::actor::SelectedItem;
-use crate::world::{Generate, World};
 
 #[derive(Copy, Clone, Debug)]
 pub struct AABB<C: Coord> {
@@ -194,7 +194,7 @@ impl Ray<Vec3> {
         while origin.distance(self.origin) < reach {
             let block = world.get_block(pos);
             
-            if block.bounds().iter().any(|&aabb| self.intersects_with(aabb.translate(pos.as_vec3()))) {
+            if block.bounds(pos).iter().any(|&b| self.intersects_with(b)) {
                 return Some(SelectedItem::Block {
                     pos,
                     block,

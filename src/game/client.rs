@@ -107,6 +107,10 @@ impl ApplicationHandler for GameClient {
             WINDOW.request_redraw();
         }
     }
+    
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.simulation.resources.get_mut::<World<TestGen>>().save();
+    }
 }
 
 impl GameClient {

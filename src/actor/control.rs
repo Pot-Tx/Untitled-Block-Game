@@ -6,9 +6,8 @@ use crate::render::*;
 use crate::util::bounding::{AABBGroup, Ray};
 use crate::util::coord::{Direction, ICoord3};
 use crate::util::Id;
-use crate::world::{Block, BlockPos, Generate, World};
+use crate::world::{Block, BlockPos, World};
 use glam::Vec3;
-use std::marker::PhantomData;
 use wgpu::{LoadOp, PrimitiveTopology};
 
 components! {
@@ -44,20 +43,24 @@ impl SelectedItem {
         match (self, other) {
             (
                 Self::Block { pos, block, .. },
-                Self::Block { pos: pos1, block: block1, .. },
-            )
-                => (block != block1, pos != pos1),
-            
+                Self::Block {
+                    pos: pos1,
+                    block: block1,
+                    ..
+                },
+            ) => (block != block1, pos != pos1),
+
             (
                 Self::Actor { entity, .. },
-                Self::Actor { entity: entity1, .. },
-            )
-                => (entity != entity1, true),
-            
+                Self::Actor {
+                    entity: entity1, ..
+                },
+            ) => (entity != entity1, true),
+
             _ => (true, true),
         }
     }
-    
+
     fn mesh(&self) -> Mesh<BasicVertex> {
         match self {
             Self::Block { block, .. } => {
@@ -94,9 +97,9 @@ pub struct PlayerController;
 
 pub struct PlayerRotator;
 
-pub struct Selector<G: Generate>(pub PhantomData<G>);
+pub struct Selector;
 
-pub struct Interactor<G: Generate>(pub PhantomData<G>);
+pub struct Interactor;
 
 pub struct SelectionRenderer {
     desc: RenderDescriptor<'static>,
@@ -119,31 +122,31 @@ impl System for PlayerController {
     ) -> Option<Vec<Command>> {
         if res.cursor_grabbed {
             let mut dir = Vec3::ZERO;
-            
+
             if res.is_action_present(1) {
                 dir.z += 1.0;
             }
-            
+
             if res.is_action_present(2) {
                 dir.x -= 1.0;
             }
-            
+
             if res.is_action_present(3) {
                 dir.z -= 1.0;
             }
-            
+
             if res.is_action_present(4) {
                 dir.x += 1.0;
             }
-            
+
             if res.is_action_present(5) {
                 dir.y += 1.0;
             }
-            
+
             if res.is_action_present(6) {
                 dir.y -= 1.0;
             }
-            
+
             entry.2.accelerate(entry.3, entry.4, dir);
         }
 
@@ -168,13 +171,13 @@ impl System for PlayerRotator {
     }
 }
 
-impl<G: Generate> System for Selector<G> {
+impl System for Selector {
     type CompQuery = (
         CompWrite<Option<Selection>>,
         CompRead<Position>,
         CompRead<Rotation>,
     );
-    type ResQuery = (ResRead<Canvas>, ResRead<World<G>>);
+    type ResQuery = (ResRead<Canvas>, ResRead<World>);
 
     fn operate(
         &mut self,
@@ -185,7 +188,7 @@ impl<G: Generate> System for Selector<G> {
             origin: entry.2.0,
             direction: entry.3.direction(),
         };
-        
+
         if let Some(item) = ray.traverse(res.1, 8.0) {
             if let Some(selection) = entry.1 {
                 let (g, i) = selection.item.update(&item);
@@ -195,13 +198,17 @@ impl<G: Generate> System for Selector<G> {
                 if i {
                     selection.instance = [item.inst()].instances(res.0, "selection");
                 }
-                
+
                 selection.item = item;
             } else {
                 let geometry = item.mesh().geometry(res.0, "selection");
                 let instance = [item.inst()].instances(res.0, "selection");
-                
-                entry.1.replace(Selection { item, geometry, instance });
+
+                entry.1.replace(Selection {
+                    item,
+                    geometry,
+                    instance,
+                });
             }
         } else {
             entry.1.take();
@@ -211,10 +218,15 @@ impl<G: Generate> System for Selector<G> {
     }
 }
 
-impl<G: Generate> System for Interactor<G> {
-    type CompQuery = (CompRead<PlayerControlled>, CompRead<Option<Selection>>, CompRead<Position>, CompRead<Bound>);
-    type ResQuery = (ResRead<InputState>, ResWrite<World<G>>);
-    
+impl System for Interactor {
+    type CompQuery = (
+        CompRead<PlayerControlled>,
+        CompRead<Option<Selection>>,
+        CompRead<Position>,
+        CompRead<Bound>,
+    );
+    type ResQuery = (ResRead<InputState>, ResWrite<World>);
+
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
@@ -226,27 +238,31 @@ impl<G: Generate> System for Interactor<G> {
                     SelectedItem::Block { pos, .. } => {
                         res.1.set_block(pos, Block::air());
                     }
-                    
+
                     SelectedItem::Actor { .. } => (),
                 }
             }
-            
+
             if res.0.is_action_present(8) {
                 match selection.item {
                     SelectedItem::Block { pos, face, .. } => {
                         let block = Block::default_of(1);
                         let bound = entry.4.translate(entry.3);
-                        
-                        if block.bounds(pos.step(face)).into_iter().all(|b| !bound.intersects_with(b)) {
+
+                        if block
+                            .bounds(pos.step(face))
+                            .into_iter()
+                            .all(|b| !bound.intersects_with(b))
+                        {
                             res.1.set_block(pos.step(face), Block::default_of(1));
                         }
                     }
-                    
+
                     SelectedItem::Actor { .. } => (),
                 }
             }
         }
-        
+
         None
     }
 }
@@ -254,20 +270,22 @@ impl<G: Generate> System for Interactor<G> {
 impl System for SelectionRenderer {
     type CompQuery = CompRead<Option<Selection>>;
     type ResQuery = (ResWrite<Option<Frame>>, ResRead<Camera>);
-    
+
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        if let Some(frame) = res.0 && let Some(selection) = entry.1 {
+        if let Some(frame) = res.0
+            && let Some(selection) = entry.1
+        {
             frame.render(&self.desc, |mut pass| {
                 self.batch.begin(&mut pass);
                 self.batch.push(&mut pass, &res.1.transform);
                 self.batch.draw(&mut pass, selection);
             });
         }
-        
+
         None
     }
 }
@@ -280,13 +298,16 @@ impl SelectionRenderer {
                 color_load: LoadOp::Load,
                 depth_load: LoadOp::Load,
             },
-            batch: RenderBatch::new(&canvas, &RenderBatchConfig {
-                name: "selection",
-                shader: "selection",
-                translucent: false,
-                topology: PrimitiveTopology::LineList,
-                depth_write: false,
-            }),
+            batch: RenderBatch::new(
+                &canvas,
+                &RenderBatchConfig {
+                    name: "selection",
+                    shader: "selection",
+                    translucent: false,
+                    topology: PrimitiveTopology::LineList,
+                    depth_write: false,
+                },
+            ),
         }
     }
 }

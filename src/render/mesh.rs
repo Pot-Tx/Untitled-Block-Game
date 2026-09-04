@@ -8,7 +8,7 @@ use std::array;
 use std::marker::PhantomData;
 use wgpu::*;
 
-const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
+pub const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 
 pub trait Render<V: Vertex, I: Inst> {
     fn rendered(&self) -> Vec<RenderItem<'_, V, I>>;
@@ -16,7 +16,7 @@ pub trait Render<V: Vertex, I: Inst> {
 
 #[derive(Clone)]
 pub struct Geometry<V: Vertex> {
-    pub vertex_buffer: Buffer,
+    pub vertex_buffer: Option<Buffer>,
     pub index_buffer: Buffer,
     pub index_count: u32,
     _marker: PhantomData<V>,
@@ -24,7 +24,7 @@ pub struct Geometry<V: Vertex> {
 
 #[derive(Clone)]
 pub struct Instances<I: Inst> {
-    pub instance_buffer: Buffer,
+    pub instance_buffer: Option<Buffer>,
     pub instance_count: u32,
     _marker: PhantomData<I>,
 }
@@ -138,14 +138,19 @@ impl<V: Vertex> Mesh<V> {
     }
 
     pub fn geometry<'a>(&self, canvas: &Canvas, name: &'a str) -> Geometry<V> {
-        let vertex_buffer = Buffer::new(
-            canvas,
-            &BufferConfig {
-                name: &format!("{}_vertex", name),
-                init: BufferInit::Content(&self.vertices),
-                usage: BufferUsages::VERTEX,
-            },
-        );
+        let vertex_buffer = if self.vertices.is_empty() {
+            None
+        } else {
+            Some(Buffer::new(
+                canvas,
+                &BufferConfig {
+                    name: &format!("{}_vertex", name),
+                    init: BufferInit::Content(&self.vertices),
+                    usage: BufferUsages::VERTEX,
+                },
+            ))
+        };
+
         let index_buffer = Buffer::new(
             canvas,
             &BufferConfig {
@@ -187,7 +192,7 @@ impl<V: Vertex> MeshGroup for [Mesh<V>] {
 
 impl Mesh<BasicVertex> {
     pub fn cuboid(min: Vec3, max: Vec3) -> [Self; 6] {
-        let p = Vec3::cuboid(min, max).map(|pos| BasicVertex { pos });
+        let p = Vec3::corners(min, max).map(|pos| BasicVertex { pos });
 
         [
             Self {
@@ -216,25 +221,14 @@ impl Mesh<BasicVertex> {
             },
         ]
     }
-    
+
     pub fn frame(min: Vec3, max: Vec3) -> Self {
-        let p = Vec3::cuboid(min, max).map(|pos| BasicVertex { pos });
-        
+        let p = Vec3::corners(min, max).map(|pos| BasicVertex { pos });
+
         Self {
             vertices: Vec::from(p),
             indices: vec![
-                0, 1,
-                0, 2,
-                0, 4,
-                1, 3,
-                1, 5,
-                2, 3,
-                2, 6,
-                3, 7,
-                4, 5,
-                4, 6,
-                5, 7,
-                6, 7,
+                0, 1, 0, 2, 0, 4, 1, 3, 1, 5, 2, 3, 2, 6, 3, 7, 4, 5, 4, 6, 5, 7, 6, 7,
             ],
         }
     }
@@ -297,14 +291,18 @@ impl<I: Inst> InstGroup for [I] {
     type Inst = I;
 
     fn instances<'a>(&self, canvas: &Canvas, name: &'a str) -> Instances<Self::Inst> {
-        let instance_buffer = Buffer::new(
-            canvas,
-            &BufferConfig {
-                name: &format!("{}_instance", name),
-                init: BufferInit::Content(self),
-                usage: BufferUsages::VERTEX,
-            },
-        );
+        let instance_buffer = if self.is_empty() {
+            None
+        } else {
+            Some(Buffer::new(
+                canvas,
+                &BufferConfig {
+                    name: &format!("{}_instance", name),
+                    init: BufferInit::Content(self),
+                    usage: BufferUsages::VERTEX,
+                },
+            ))
+        };
 
         Instances {
             instance_buffer,

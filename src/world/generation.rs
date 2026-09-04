@@ -1,235 +1,441 @@
-use crate::util::Id;
+use crate::ecs::Resource;
+use crate::util::bounding::AABB;
+use crate::util::collection::Volume;
+use crate::util::coord::{Axis, Coord3};
 use crate::world::block::Meta;
 use crate::world::region::*;
-use crate::world::BlockPos;
-use glam::IVec3;
-use noise::{NoiseFn, Perlin};
+use crate::world::{BlockPos, Chunk, RegionPos, WorldThreads, LOD_COUNT};
+use crossbeam_channel::{Receiver, Sender};
+use glam::{U8Vec3, Vec3};
+use log::error;
+use rand::RngExt;
+use rand_pcg::Pcg64Mcg;
+use rand_seeder::Seeder;
 use rayon::prelude::*;
-use std::array;
-use std::marker::PhantomData;
+use std::collections::HashMap;
+use std::ops::{Add, AddAssign, Mul, MulAssign};
 use std::sync::{Arc, RwLock};
 
-pub trait Generate: Sync + Send + Sized + 'static {
-    fn generate(&self, pos: BlockPos) -> Meta;
+pub type Grid = Volume<Sample>;
+pub const SAMPLE_INTERVAL: u8 = 8;
+pub const UNIT_GRID_SIZE: u8 = REGION_SIZE / SAMPLE_INTERVAL + 1;
 
-    fn generate_chunk(&self, origin: BlockPos, size: u8) -> Chunk;
+pub struct Field {
+    pub temperature: fn(BlockPos) -> f32,
+    pub ventilation: fn(BlockPos) -> f32,
+    pub humidity: fn(BlockPos) -> f32,
+    pub density: fn(BlockPos) -> f32,
+}
 
-    fn perform<T: GenType>(&self, task: GenTask, context: &T::Context) -> GenResult<T> {
-        let id = task.id;
-        let pos = task.pos;
-        let output = T::perform(self, &task, context);
+impl Field {
+    pub fn get(&self, pos: BlockPos) -> Sample {
+        let mut gradient = Vec3::ZERO;
+        let offset = (SAMPLE_INTERVAL / 2) as i32;
+        Axis::ALL.iter().for_each(|&axis| {
+            gradient = gradient.shift(
+                axis,
+                (self.density)(pos.shift(axis, offset)) - (self.density)(pos.shift(axis, -offset)),
+            );
+        });
+        gradient /= SAMPLE_INTERVAL as f32;
 
-        GenResult { id, pos, output }
-    }
-
-    fn perform_batch<T: GenType>(&self, batch: GenTaskBatch<T>) -> GenResultBatch<T> {
-        let context = batch.context;
-        let results = batch
-            .tasks
-            .into_par_iter()
-            .map(|task| self.perform(task, &context))
-            .collect();
-
-        GenResultBatch {
-            context: T::next(&context),
-            results,
+        Sample {
+            temperature: (self.temperature)(pos),
+            ventilation: (self.ventilation)(pos),
+            humidity: (self.humidity)(pos),
+            density: (self.density)(pos),
+            gradient,
         }
     }
 }
 
-pub struct TestGen {
-    perlin: Perlin,
+#[derive(Clone, Copy, Default)]
+pub struct Sample {
+    pub temperature: f32,
+    pub ventilation: f32,
+    pub humidity: f32,
+    pub density: f32,
+    pub gradient: Vec3,
 }
 
-impl Generate for TestGen {
-    fn generate(&self, pos: BlockPos) -> Meta {
-        let height = (self.perlin.get([pos.x as f64 / 32.0, pos.z as f64 / 32.0]) * 32.0) as i32;
-        if pos.y > height { 0 } else { 1 }
+impl Add for Sample {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            temperature: self.temperature + rhs.temperature,
+            ventilation: self.ventilation + rhs.ventilation,
+            humidity: self.humidity + rhs.humidity,
+            density: self.density + rhs.density,
+            gradient: self.gradient + rhs.gradient,
+        }
+    }
+}
+
+impl AddAssign for Sample {
+    fn add_assign(&mut self, rhs: Self) {
+        self.temperature += rhs.temperature;
+        self.ventilation += rhs.ventilation;
+        self.humidity += rhs.humidity;
+        self.density += rhs.density;
+        self.gradient += rhs.gradient;
+    }
+}
+
+impl Mul<f32> for Sample {
+    type Output = Self;
+
+    fn mul(self, rhs: f32) -> Self::Output {
+        Self {
+            temperature: self.temperature * rhs,
+            ventilation: self.ventilation * rhs,
+            humidity: self.humidity * rhs,
+            density: self.density * rhs,
+            gradient: self.gradient * rhs,
+        }
+    }
+}
+
+impl MulAssign<f32> for Sample {
+    fn mul_assign(&mut self, rhs: f32) {
+        self.temperature *= rhs;
+        self.ventilation *= rhs;
+        self.humidity *= rhs;
+        self.density *= rhs;
+        self.gradient *= rhs;
+    }
+}
+
+pub struct Structure {
+    pub blocks: [Volume<Option<Meta>>; LOD_COUNT],
+    pub condition: fn(&Grid, LocalPos) -> bool,
+    pub count: u16,
+}
+
+impl Structure {
+    pub fn tree() -> Self {
+        let mut blocks0 = Volume::new(U8Vec3::new(5, 8, 5));
+        blocks0.fill(U8Vec3::new(0, 4, 1), U8Vec3::new(5, 7, 4), Some(5));
+        blocks0.fill(U8Vec3::new(1, 3, 1), U8Vec3::new(4, 8, 4), Some(5));
+        blocks0.fill(U8Vec3::new(1, 4, 0), U8Vec3::new(4, 7, 5), Some(5));
+        blocks0.fill(U8Vec3::new(2, 0, 2), U8Vec3::new(3, 7, 3), Some(4));
+        let mut blocks1 = Volume::new(U8Vec3::new(3, 4, 3));
+        blocks1.fill(U8Vec3::new(0, 1, 0), U8Vec3::new(3, 4, 3), Some(5));
+        blocks1.fill(U8Vec3::new(1, 0, 1), U8Vec3::new(2, 3, 2), Some(4));
+        let mut blocks2 = Volume::splat(U8Vec3::new(1, 2, 1), Some(5));
+        blocks2.set(U8Vec3::ZERO, Some(4));
+        let blocks3 = Volume::splat(U8Vec3::new(1, 1, 1), Some(5));
+
+        Self {
+            blocks: [
+                blocks0,
+                blocks1,
+                blocks2,
+                blocks3.clone(),
+                blocks3.clone(),
+                blocks3,
+            ],
+            condition: |grid, pos| -> bool {
+                let base = pos + U8Vec3::new(2, 0, 2);
+
+                let root = grid.sample(base, 0);
+                if !(root.density > 0.0 && root.ventilation < 0.0 && root.density < 0.125) {
+                    return false;
+                }
+
+                for dy in 3..6 {
+                    let trunk = grid.sample(base.shift(Axis::Y, dy), 0);
+                    if trunk.density > 0.0 || trunk.ventilation < 0.0 {
+                        return false;
+                    }
+                }
+
+                true
+            },
+            count: 256,
+        }
+    }
+}
+
+impl Grid {
+    fn sample(&self, pos: LocalPos, lod: u8) -> Sample {
+        let origin = pos / SAMPLE_INTERVAL;
+        let size = Region::block_size_on_lod(lod);
+        let offset = (size / SAMPLE_INTERVAL).max(1);
+        let corners = U8Vec3::corners(U8Vec3::ZERO, U8Vec3::ONE);
+
+        let pos = if size == 1 {
+            pos
+        } else {
+            let mut min_density = 1.0;
+            let mut min_corner = U8Vec3::ZERO;
+            for corner in corners {
+                let density = self.get(origin + corner * offset).density;
+                if density < min_density {
+                    min_density = density;
+                    min_corner = corner;
+                }
+            }
+            pos + min_corner * (size - 1)
+        };
+        let interval = offset * SAMPLE_INTERVAL;
+        let rate = (pos % interval).as_vec3() / interval as f32;
+
+        let mut sample = Sample {
+            temperature: 0.0,
+            ventilation: 0.0,
+            humidity: 0.0,
+            density: 0.0,
+            gradient: Vec3::ZERO,
+        };
+
+        for corner in corners {
+            let offset = corner * offset;
+            let weight = (rate - (1 - corner).as_vec3()).abs();
+
+            sample += *self.get(origin + offset) * weight.element_product();
+        }
+
+        sample
+    }
+}
+
+impl Chunk {
+    fn place(&mut self, pos: LocalPos, blocks: Volume<Option<Meta>>) {
+        let max = pos + blocks.size;
+        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
+
+        let [w, h, _] = self.size.as_usizevec3().to_array();
+        let [sw, sh, sd] = blocks.size.as_usizevec3().to_array();
+        let [dx, dy, dz] = pos.as_usizevec3().to_array();
+
+        for z in 0..sd {
+            for y in 0..sh {
+                let src = z * sh * sw + y * sw;
+                let dst = (z + dz) * h * w + (y + dy) * w + dx;
+                for (dst, src) in self.vec[dst..dst + sw]
+                    .iter_mut()
+                    .zip(blocks.vec[src..src + sw].iter())
+                {
+                    if let Some(meta) = src {
+                        *dst = *meta;
+                    }
+                }
+            }
+        }
+    }
+}
+
+pub struct Generator {
+    context: Arc<GenContext>,
+    task_rx: Receiver<GenTask>,
+}
+
+pub struct GenContext {
+    field: Field,
+    grids: RwLock<HashMap<RegionPos, Grid>>,
+    sites: RwLock<HashMap<RegionPos, Vec<Vec<LocalPos>>>>,
+
+    terrain: fn(Sample) -> Meta,
+    structures: Vec<Structure>,
+    after: fn(Meta, &Chunk, LocalPos) -> Meta,
+}
+
+impl Generator {
+    pub fn new(
+        field: Field,
+        terrain: fn(Sample) -> Meta,
+        structures: Vec<Structure>,
+        after: fn(Meta, &Chunk, LocalPos) -> Meta,
+        task_rx: Receiver<GenTask>,
+    ) -> Self {
+        Self {
+            context: Arc::new(GenContext {
+                field,
+                grids: RwLock::new(HashMap::new()),
+                sites: RwLock::new(HashMap::new()),
+
+                terrain,
+                structures,
+                after,
+            }),
+            task_rx,
+        }
     }
 
-    fn generate_chunk(&self, origin: BlockPos, size: u8) -> Chunk {
-        let mut chunk = Chunk::new(size);
+    pub fn update(&mut self, threads: &WorldThreads) {
+        let WorldThreads(near_threads, far_threads) = threads;
 
-        for x in 0..size {
-            for z in 0..size {
-                let abx = origin.x + x as i32;
-                let abz = origin.z + z as i32;
-                let aby = (self.perlin.get([abx as f64 / 32.0, abz as f64 / 32.0]) * 32.0) as i32;
-                let y = (aby - origin.y).clamp(0, (size - 1) as i32) as u8;
-
-                chunk.fill(
-                    RelBlockPos::new(x, 0, z),
-                    RelBlockPos::new(x + 1, y + 1, z + 1),
-                    1,
-                );
+        let mut near_tasks = Vec::new();
+        let mut far_tasks = Vec::new();
+        for task in self.task_rx.try_iter() {
+            match task.lod {
+                0 => near_tasks.push(task),
+                1.. => far_tasks.push(task),
             }
         }
 
-        chunk
-    }
-}
+        let context = self.context.clone();
+        near_threads.spawn(move || {
+            near_tasks.into_par_iter().for_each(|task| {
+                Self::perform(&context, task);
+            })
+        });
 
-impl TestGen {
-    pub fn new(seed: u32) -> Self {
-        Self {
-            perlin: Perlin::new(seed),
+        let context = self.context.clone();
+        far_threads.spawn(move || {
+            far_tasks.into_par_iter().for_each(|task| {
+                Self::perform(&context, task);
+            })
+        });
+    }
+
+    fn perform(context: &GenContext, task: GenTask) {
+        let grid = context.grid(task.pos - 1, 3);
+        let origin = REGION_SIZE - Region::block_size_on_lod(task.lod);
+        let size = Region::chunk_size_on_lod(task.lod);
+
+        let mut chunk = Chunk::from_fn(U8Vec3::splat(size), |pos| {
+            let sample = grid.sample(origin + pos * Region::block_size_on_lod(task.lod), task.lod);
+            (context.terrain)(sample)
+        });
+
+        let sites = context.sites(task.pos - 1, 2);
+        let origin = U8Vec3::splat(REGION_SIZE >> task.lod) - 1;
+        let bound = AABB {
+            min: origin,
+            max: origin + Region::chunk_size_on_lod(task.lod),
+        };
+
+        for (struct_sites, structure) in sites.iter().zip(context.structures.iter()) {
+            let blocks = &structure.blocks[task.lod as usize];
+            let struct_bound = AABB {
+                min: U8Vec3::ZERO,
+                max: blocks.size,
+            };
+
+            for &site in struct_sites.iter() {
+                let pos = site >> task.lod;
+                let struct_bound = struct_bound.translate(pos);
+
+                let pos = struct_bound.min.saturating_sub(bound.min);
+                let min = bound.min.saturating_sub(struct_bound.min);
+                let max = blocks
+                    .size
+                    .saturating_sub(struct_bound.max.saturating_sub(bound.max));
+                if min.max_element() < max.min_element() {
+                    chunk.place(pos, blocks.part(min, max - min));
+                }
+            }
+        }
+
+        for x in 1..size - 1 {
+            for y in 1..size - 1 {
+                for z in 1..size - 1 {
+                    let pos = LocalPos::new(x, y, z);
+                    let meta = (context.after)(*chunk.get(pos), &chunk, pos);
+                    chunk.set(pos, meta);
+                }
+            }
+        }
+
+        let result = GenResult {
+            lod: task.lod,
+            chunk,
+        };
+
+        if let Err(e) = task.tx.try_send(result) {
+            error!("Failed to send generation result to Region: {}", e);
         }
     }
 }
 
-pub trait GenType {
-    type Output: Sync + Send;
-    type Context: Sync + Send;
+impl GenContext {
+    fn grid(&self, pos: RegionPos, side: u8) -> Grid {
+        let mut area_grid = Grid::new(U8Vec3::splat((UNIT_GRID_SIZE - 1) * side + 1));
 
-    fn perform(generator: &impl Generate, task: &GenTask, context: &Self::Context) -> Self::Output;
+        for dx in 0..side {
+            for dy in 0..side {
+                for dz in 0..side {
+                    let offset = U8Vec3::new(dx, dy, dz);
+                    let pos = pos + offset.as_ivec3();
 
-    fn next(context: &Self::Context) -> Self::Context;
-}
+                    if !self.grids.read().unwrap().contains_key(&pos) {
+                        let mut grids = self.grids.write().unwrap();
+                        let origin = pos * REGION_SIZE as i32;
+                        let region_grid = Volume::from_fn(U8Vec3::splat(UNIT_GRID_SIZE), |pos| {
+                            self.field
+                                .get(origin + pos.as_ivec3() * SAMPLE_INTERVAL as i32)
+                        });
+                        grids.insert(pos, region_grid);
+                    }
 
-pub trait TreeGenType: GenType<Context = u8> {
-    fn applies_to(node: &BlockNode) -> bool;
-}
+                    let grids = self.grids.read().unwrap();
+                    area_grid.fit(offset * (UNIT_GRID_SIZE - 1), grids.get(&pos).unwrap());
+                }
+            }
+        }
 
-pub struct Split;
-
-pub struct Fold;
-
-pub struct Area;
-
-impl GenType for Split {
-    type Output = [Meta; 8];
-    type Context = u8;
-
-    #[inline]
-    fn perform(generator: &impl Generate, task: &GenTask, context: &Self::Context) -> Self::Output {
-        let offset = BlockTree::block_size_on_layer(context + 1);
-        let base = task.pos + (offset / 2) as i32;
-        array::from_fn(|i| {
-            let pos = base + IVec3::from(BlockTree::child_pos_of_index(i as u8) * offset);
-            generator.generate(pos)
-        })
+        area_grid
     }
 
-    #[inline]
-    fn next(context: &Self::Context) -> Self::Context {
-        context + 1
+    fn sites(&self, pos: RegionPos, side: u8) -> Vec<Vec<LocalPos>> {
+        let mut area_sites = vec![Vec::new(); self.structures.len()];
+
+        for dx in 0..side {
+            for dy in 0..side {
+                for dz in 0..side {
+                    let offset = U8Vec3::new(dx, dy, dz);
+                    let pos = pos + offset.as_ivec3();
+
+                    if !self.sites.read().unwrap().contains_key(&pos) {
+                        let mut sites = self.sites.write().unwrap();
+                        let grid = self.grid(pos, 2);
+                        let region_sites = self
+                            .structures
+                            .iter()
+                            .enumerate()
+                            .map(|(i, structure)| {
+                                let mut struct_sites = Vec::new();
+                                let mut rand = Seeder::from((pos, i)).into_rng::<Pcg64Mcg>();
+                                for _ in 0..structure.count {
+                                    let pos = rand.random::<LocalPos>() % REGION_SIZE;
+                                    if (structure.condition)(&grid, pos) {
+                                        struct_sites.push(pos);
+                                    }
+                                }
+                                struct_sites
+                            })
+                            .collect();
+                        sites.insert(pos, region_sites);
+                    }
+
+                    let sites = self.sites.read().unwrap();
+                    let region_sites = sites.get(&pos).unwrap();
+                    area_sites.iter_mut().zip(region_sites.iter()).for_each(
+                        |(struct_sites, region_sites)| {
+                            for site in region_sites.iter() {
+                                struct_sites.push(site + offset * REGION_SIZE);
+                            }
+                        },
+                    );
+                }
+            }
+        }
+
+        area_sites
     }
-}
-
-impl TreeGenType for Split {
-    #[inline]
-    fn applies_to(node: &BlockNode) -> bool {
-        node.is_leaf()
-    }
-}
-
-impl Split {
-    #[inline]
-    pub fn further_on(result: &GenResult<Self>, child_id: Id, offset: u8) -> [GenTask; 8] {
-        let base = result.pos;
-        array::from_fn(|i| {
-            let id = child_id + i as u32;
-            let pos = base + IVec3::from(BlockTree::child_pos_of_index(i as u8) * offset);
-            GenTask { id, pos }
-        })
-    }
-}
-
-impl GenType for Fold {
-    type Output = Meta;
-    type Context = u8;
-
-    #[inline]
-    fn perform(generator: &impl Generate, task: &GenTask, context: &Self::Context) -> Self::Output {
-        let offset = BlockTree::block_size_on_layer(context + 1);
-        let pos = task.pos + offset as i32;
-        generator.generate(pos)
-    }
-
-    #[inline]
-    fn next(context: &Self::Context) -> Self::Context {
-        *context
-    }
-}
-
-impl TreeGenType for Fold {
-    #[inline]
-    fn applies_to(node: &BlockNode) -> bool {
-        node.is_branch()
-    }
-}
-
-impl GenType for Area {
-    type Output = Chunk;
-    type Context = u8;
-
-    #[inline]
-    fn perform(generator: &impl Generate, task: &GenTask, context: &Self::Context) -> Self::Output {
-        generator.generate_chunk(task.pos, *context)
-    }
-
-    #[inline]
-    fn next(context: &Self::Context) -> Self::Context {
-        *context
-    }
-}
-
-pub struct GenTaskBatch<T: GenType> {
-    pub context: T::Context,
-    pub tasks: Vec<GenTask>,
-    pub _marker: PhantomData<T>,
 }
 
 pub struct GenTask {
-    pub id: Id,
-    pub pos: BlockPos,
+    pub pos: RegionPos,
+    pub lod: u8,
+    pub tx: Sender<GenResult>,
 }
 
-pub struct GenResult<T: GenType> {
-    pub id: Id,
-    pub pos: BlockPos,
-    pub output: T::Output,
+pub struct GenResult {
+    pub lod: u8,
+    pub chunk: Chunk,
 }
 
-pub struct GenResultBatch<T: GenType> {
-    pub context: T::Context,
-    pub results: Vec<GenResult<T>>,
-}
-
-impl GenTaskBatch<Area> {
-    pub fn new_near(origin: BlockPos) -> Self {
-        let task = GenTask {
-            id: 0,
-            pos: origin - 1,
-        };
-
-        Self {
-            context: REGION_SIZE + 2,
-            tasks: vec![task],
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<T: TreeGenType> GenTaskBatch<T> {
-    pub fn new_far(origin: BlockPos, tree: Arc<RwLock<BlockTree>>, layer: u8) -> Self {
-        let mut tasks = Vec::new();
-        let tree = tree.read().unwrap();
-
-        for item in tree.iter_layer(layer) {
-            if T::applies_to(item.node) {
-                let task = GenTask {
-                    id: item.id,
-                    pos: origin + IVec3::from(item.pos),
-                };
-                tasks.push(task);
-            }
-        }
-
-        Self {
-            context: layer,
-            tasks,
-            _marker: PhantomData,
-        }
-    }
-}
+impl Resource for Generator {}

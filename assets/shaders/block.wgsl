@@ -8,7 +8,7 @@ struct VertexIn {
 
 struct VertexOut {
     @builtin(position) pos: vec4f,
-    @location(0) tex: u32,
+    @location(0) @interpolate(flat) tex: u32,
     @location(1) uv: vec2f,
     @location(2) illum: f32,
 }
@@ -39,9 +39,9 @@ fn vs_main(in: VertexIn) -> VertexOut {
 @fragment
 fn fs_main(in: VertexOut) -> FragmentOut {
     var color = textureSample(textures, texsampler, in.uv, in.tex);
-    color.x *= in.illum;
-    color.y *= in.illum;
-    color.z *= in.illum;
-    
+    color.r *= in.illum;
+    color.g *= in.illum;
+    color.b *= in.illum;
+
     return FragmentOut(color, in.pos.z);
 }

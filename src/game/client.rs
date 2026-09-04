@@ -1,12 +1,15 @@
 use crate::actor::*;
 use crate::ecs::*;
 use crate::game::{Escaper, InputFlusher, InputState, FRAME_DURATION, TICK_DURATION};
+use crate::render::ViewPort;
 use crate::render::*;
+use crate::ui::{create_sprite_geometry, CrosshairRenderer, SPRITE_GEOMETRY};
+use crate::util::coord::{Direction, ICoord3};
 use crate::util::OnceInit;
 use crate::world::*;
 use crossbeam_channel::unbounded;
+use noise_functions::{CellDistanceSq, Noise, Perlin};
 use rayon::ThreadPoolBuilder;
-use std::marker::PhantomData;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -31,7 +34,7 @@ impl ApplicationHandler for GameClient {
                     .create_window(Window::default_attributes().with_title("To be Titled"))
                     .expect("Failed to create window"),
             );
-            
+
             self.init();
         }
     }
@@ -44,6 +47,10 @@ impl ApplicationHandler for GameClient {
 
             WindowEvent::Resized(size) => {
                 self.simulation.resources.get_mut::<Canvas>().resize(size);
+                self.simulation
+                    .resources
+                    .get_mut::<ViewPort>()
+                    .transform(self.simulation.resources.get::<Canvas>());
             }
 
             WindowEvent::RedrawRequested => {
@@ -93,7 +100,7 @@ impl ApplicationHandler for GameClient {
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
         if self.tick_timer.elapsed() >= *TICK_DURATION {
             self.tick_timer = Instant::now();
-            
+
             self.simulation.update();
         }
 
@@ -103,20 +110,20 @@ impl ApplicationHandler for GameClient {
             let partial_tick =
                 self.tick_timer.elapsed().as_secs_f32() / TICK_DURATION.as_secs_f32();
             self.simulation.resources.get_mut::<PartialTick>().0 = partial_tick;
-            
+
             WINDOW.request_redraw();
         }
     }
-    
+
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        self.simulation.resources.get_mut::<World<TestGen>>().save();
+        self.simulation.resources.get_mut::<World>().save();
     }
 }
 
 impl GameClient {
     pub fn new() -> Self {
+        let (gen_tx, gen_rx) = unbounded();
         let (meshing_tx, meshing_rx) = unbounded();
-        let (mesh_tx, mesh_rx) = unbounded();
 
         let mut simulation = Simulation::new();
 
@@ -132,12 +139,8 @@ impl GameClient {
         simulation.systems.register(1, Translator);
         simulation.systems.register(2, Collider);
         simulation.systems.register(3, Friction);
-        simulation
-            .systems
-            .register(4, Selector::<TestGen>(PhantomData));
-        simulation
-            .systems
-            .register(5, WorldUpdater(PhantomData::<TestGen>));
+        simulation.systems.register(4, Selector);
+        simulation.systems.register(5, WorldUpdater);
         simulation.systems.register(6, ChunkMeshing);
 
         simulation.resources.register(InputState::new());
@@ -154,29 +157,75 @@ impl GameClient {
         simulation
             .resources
             .register(WorldThreads(near_threads, far_threads));
-        simulation.resources.register(World::new(
-            vec![2, 4, 6, 8, 10, 12, 14, 16],
-            TestGen::new(0),
-            meshing_tx,
+        simulation
+            .resources
+            .register(World::new(vec![4, 8, 12, 16, 20, 24], gen_tx, meshing_tx));
+        simulation.resources.register(Generator::new(
+            Field {
+                temperature: |_| -> f32 { 0.0 },
+                ventilation: |pos| -> f32 {
+                    let mut pos = pos.as_vec3();
+                    pos.y *= 2.0;
+
+                    let v1 = CellDistanceSq::default()
+                        .jitter(0.75)
+                        .frequency(0.03125)
+                        .sample3(pos);
+
+                    let v2 = CellDistanceSq::default()
+                        .jitter(1.25)
+                        .frequency(0.03125)
+                        .sample3(pos);
+
+                    let v3 = -(pos.y + 128.0) * 0.00390625;
+
+                    (v1 + v2 + v3).tanh()
+                },
+                humidity: |_| -> f32 { 0.0 },
+                density: |pos| -> f32 {
+                    let pos = pos.as_vec3();
+
+                    let d1 = Perlin::default().frequency(0.03125).sample3(pos);
+
+                    let d2 = -pos.y * 0.015625;
+
+                    (d1 + d2).tanh()
+                },
+            },
+            |sample| -> Meta {
+                if sample.density > 0.0 && sample.ventilation < 0.0 {
+                    if sample.density < 0.125 && sample.gradient.y < 0.0 {
+                        2
+                    } else {
+                        1
+                    }
+                } else {
+                    0
+                }
+            },
+            vec![Structure::tree()],
+            |meta, chunk, pos| -> Meta {
+                if meta == 2 && *chunk.get(pos.step(Direction::Up)) == 0 {
+                    3
+                } else {
+                    meta
+                }
+            },
+            gen_rx,
         ));
-        simulation
-            .resources
-            .register(ChunkMesher::new(meshing_rx, mesh_tx));
-        simulation
-            .resources
-            .register(RenderedWorld::new(16, mesh_rx));
+        simulation.resources.register(ChunkMesher::new(meshing_rx));
         simulation.resources.register::<Option<Frame>>(None);
         simulation.resources.register(PartialTick(0.0));
 
         let mut render_systems = SystemManager::new();
-        
+
         render_systems.register(0, Escaper);
         render_systems.register(1, PlayerRotator);
-        render_systems.register(2, Interactor(PhantomData::<TestGen>));
+        render_systems.register(2, Interactor);
         render_systems.register(2, CameraTransformer);
         render_systems.register(3, InputFlusher);
         render_systems.register(3, RenderStarter);
-        render_systems.register(5, RenderFinisher);
+        render_systems.register(6, RenderFinisher);
 
         Self {
             frame_timer: Instant::now(),
@@ -186,23 +235,28 @@ impl GameClient {
             render_systems,
         }
     }
-    
+
     pub fn init(&mut self) {
         let canvas = pollster::block_on(Canvas::new(&WINDOW));
+        SPRITE_GEOMETRY.init(create_sprite_geometry(&canvas));
 
         let block_textures =
             BlockTextures(create_block_textures().create_texture_sampler(&canvas, "block"));
         let camera = Camera::new(&canvas);
         let world_renderer = WorldRenderer::new(&canvas);
         let selection_renderer = SelectionRenderer::new(&canvas);
+        let crosshair_renderer = CrosshairRenderer::new(&canvas);
+        let viewport = ViewPort::new(&canvas);
 
-        self.render_systems.register(3, world_renderer);
-        self.render_systems.register(3, selection_renderer);
+        self.render_systems.register(4, world_renderer);
+        self.render_systems.register(4, selection_renderer);
+        self.render_systems.register(5, crosshair_renderer);
         self.simulation.resources.register(canvas);
         self.simulation.resources.register(block_textures);
         self.simulation.resources.register(camera);
+        self.simulation.resources.register(viewport);
         self.simulation.spawn(ACTOR_TYPES.get(1).create());
-        
+
         self.simulation.systems.init();
         self.render_systems.init();
     }

@@ -121,7 +121,7 @@ impl EntityDescriptor {
             values: HashMap::new(),
         }
     }
-    
+
     pub fn with<C: Component>(mut self, value: C) -> Self {
         self.values.insert(TypeId::of::<C>(), ErasedBox::new(value));
         self

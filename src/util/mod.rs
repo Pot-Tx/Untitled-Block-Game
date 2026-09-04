@@ -120,7 +120,7 @@ impl<T> OnceInit<T> {
             inner: OnceLock::new(),
         }
     }
-    
+
     pub fn ready(&self) -> bool {
         self.inner.get().is_some()
     }
@@ -136,18 +136,35 @@ pub struct SwapPair<T> {
     left: Option<T>,
     right: Option<T>,
     on_right: bool,
-    counter: u8,
+    timer: u8,
+}
+
+impl<T> Default for SwapPair<T> {
+    fn default() -> Self {
+        Self {
+            left: None,
+            right: None,
+            on_right: false,
+            timer: u8::MAX,
+        }
+    }
+}
+
+impl<T: Clone> Clone for SwapPair<T> {
+    fn clone(&self) -> Self {
+        Self {
+            left: self.left.clone(),
+            right: self.right.clone(),
+            on_right: self.on_right,
+            timer: self.timer,
+        }
+    }
 }
 
 impl<T> SwapPair<T> {
     #[inline]
     pub fn new() -> Self {
-        Self {
-            left: None,
-            right: None,
-            on_right: false,
-            counter: u8::MAX,
-        }
+        Self::default()
     }
 
     #[inline]
@@ -157,14 +174,23 @@ impl<T> SwapPair<T> {
         } else {
             self.right = item;
         }
-        self.counter = time;
+        self.timer = time;
+
+        if time == 0 {
+            self.on_right = !self.on_right;
+            if self.on_right {
+                self.left = None;
+            } else {
+                self.right = None;
+            }
+        }
     }
 
     #[inline]
     pub fn update(&mut self) -> bool {
-        if self.counter > 0 {
-            self.counter -= 1;
-            if self.counter == 0 {
+        if self.timer > 0 {
+            self.timer -= 1;
+            if self.timer == 0 {
                 self.on_right = !self.on_right;
                 if self.on_right {
                     self.left = None;
@@ -181,7 +207,7 @@ impl<T> SwapPair<T> {
     }
 
     #[inline]
-    pub fn current(&self) -> Option<&T> {
+    pub fn get(&self) -> Option<&T> {
         if self.on_right {
             self.right.as_ref()
         } else {

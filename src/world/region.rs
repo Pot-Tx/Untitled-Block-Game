@@ -1,977 +1,508 @@
-use crate::util::collection::{CubicVec, DenseMap};
-use crate::util::math::AllEq;
-use crate::util::{Id, IdAllocator};
+use crate::render::{
+    AlphaVertex, Canvas, Geometry, InstGroup, Instances, IntTransInst, NormTexVertex, Render,
+    RenderItem,
+};
+use crate::util::bounding::AABB;
+use crate::util::collection::Volume;
+use crate::util::SwapPair;
 use crate::world::block::Meta;
 use crate::world::generation::*;
-use crate::world::meshing::MeshingTask;
-use crate::world::{Block, BlockPos, RegionPos};
-use anyhow::{Error, Result};
+use crate::world::model::MeshingTask;
+use crate::world::{Block, Chunk, MeshingResult, RegionPos};
+use anyhow::{anyhow, Result};
 use crossbeam_channel::*;
-use glam::U8Vec3;
+use glam::{U8Vec3, Vec3};
 use log::error;
-use rayon::ThreadPool;
 use smallvec::SmallVec;
-use std::collections::HashSet;
-use std::fmt;
-use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::marker::PhantomData;
-use std::sync::{Arc, RwLock};
-use std::{array, io};
 
-pub type Chunk = CubicVec<Meta>;
-pub type RelBlockPos = U8Vec3;
-pub type ChunkPos = U8Vec3;
-pub const REGION_SIZE: u8 = 64;
-pub const MAX_LAYER_DEPTH: u8 = 6;
+pub type LocalPos = U8Vec3;
+pub type SubRegionPos = U8Vec3;
+pub const REGION_SIZE: u8 = 32;
+pub const SUBREGION_SIZE: u8 = 16;
+pub const SUBREGION_COUNT: u8 = REGION_SIZE / SUBREGION_SIZE;
+pub const SUBCHUNK_SIZE: u8 = SUBREGION_SIZE + 2;
+pub const MAX_LOD: u8 = REGION_SIZE.ilog2() as u8;
 
-pub struct BlockTree {
-    nodes: DenseMap<BlockNode>,
-    allocator: IdAllocator,
-}
-
-#[derive(Eq, PartialEq, Debug)]
-pub enum BlockNode {
-    Leaf(Meta),
-    Branch(Id),
-}
-
-pub struct BlockTreeIter<'a> {
-    tree: &'a BlockTree,
-    items: Vec<BlockNodeInfo<'a>>,
-}
-
-pub struct BlockLayerIter<'a> {
-    tree: &'a BlockTree,
-    layer: u8,
-    items: Vec<BlockNodeInfo<'a>>,
-}
-
-#[derive(Clone)]
-pub struct BlockNodeInfo<'a> {
-    pub layer: u8,
-    pub id: Id,
-    pub pos: RelBlockPos,
-    pub node: &'a BlockNode,
-    count: u8,
-}
-
-impl Debug for BlockTree {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "BlockTree")?;
-        for item in self.iter() {
-            let prefix = "  ".repeat(item.layer as usize);
-            let pos = item.pos;
-            writeln!(
-                f,
-                "{}└─{} ({}, {}, {}) {:?}",
-                prefix, item.id, pos.x, pos.y, pos.z, item.node
-            )?;
-        }
-        Ok(())
-    }
-}
-
-impl BlockTree {
-    fn new(meta: Meta) -> Self {
-        let mut nodes = DenseMap::new();
-        let mut allocator = IdAllocator::new();
-        nodes.insert(0, BlockNode::Leaf(meta));
-        allocator.alloc(1);
-
-        Self { nodes, allocator }
-    }
-
-    #[inline]
-    pub const fn child_pos_of_index(idx: u8) -> U8Vec3 {
-        U8Vec3::new(idx & 0b1, (idx >> 1) & 0b1, (idx >> 2) & 0b1)
-    }
-
-    #[inline]
-    pub const fn child_index_of_pos(pos: U8Vec3) -> u8 {
-        pos.x + (pos.y << 1) + (pos.z << 2)
-    }
-
-    #[inline]
-    pub const fn block_size_on_layer(layer: u8) -> u8 {
-        REGION_SIZE >> layer
-    }
-
-    #[inline]
-    fn root(&self) -> &BlockNode {
-        self.nodes.get(0).expect("Block Tree does not have root")
-    }
-
-    #[inline]
-    fn get(&self, id: Id) -> Option<&BlockNode> {
-        self.nodes.get(id)
-    }
-
-    #[inline]
-    fn get_group(&self, id: Id) -> [Option<&BlockNode>; 8] {
-        array::from_fn(|i| self.get(id + i as u32))
-    }
-
-    fn get_sized_meta(&self, mut pos: RelBlockPos) -> (u8, Meta) {
-        let mut node = self.root();
-        let mut size = REGION_SIZE;
-
-        loop {
-            match node {
-                BlockNode::Leaf(meta) => {
-                    return (size, *meta);
-                }
-
-                BlockNode::Branch(id) => {
-                    size /= 2;
-                    let idx = BlockTree::child_index_of_pos(pos / size);
-                    node = self
-                        .get(*id + idx as u32)
-                        .expect("Failed to find child of Block Tree Branch");
-                    pos %= size;
-                }
-            }
-        }
-    }
-
-    fn replace(&mut self, id: Id, node: BlockNode) -> Option<BlockNode> {
-        self.nodes.insert(id, node)
-    }
-
-    #[inline]
-    fn insert(&mut self, node: BlockNode) -> Id {
-        let id = self.allocator.alloc(1);
-        self.nodes.insert(id, node);
-        id
-    }
-
-    #[inline]
-    fn insert_group(&mut self, nodes: [BlockNode; 8]) -> Id {
-        let id = self.allocator.alloc(8);
-        for (i, node) in nodes.into_iter().enumerate() {
-            self.nodes.insert(id + i as u32, node);
-        }
-        id
-    }
-
-    #[inline]
-    fn remove(&mut self, id: Id) {
-        self.nodes.remove(id);
-        self.allocator.free(id, 1);
-    }
-
-    #[inline]
-    fn remove_group(&mut self, id: Id) {
-        for i in 0..8 {
-            self.nodes.remove(id + i);
-        }
-        self.allocator.free(id, 8);
-    }
-
-    fn split(&mut self, id: Id, children: [Meta; 8], force: bool) -> Option<Id> {
-        if let Some(BlockNode::Leaf(_)) = self.get(id) {
-            if force || !children.all_eq() {
-                let children = children.map(|meta| BlockNode::Leaf(meta));
-                let child_id = self.insert_group(children);
-                self.replace(id, BlockNode::Branch(child_id));
-
-                return Some(child_id);
-            }
-        }
-        None
-    }
-
-    fn fold(&mut self, id: Id, meta: Meta, force: bool) -> Option<BlockNode> {
-        if let Some(BlockNode::Branch(child_id)) = self.get(id) {
-            let children = self.get_group(*child_id);
-            if force || children.all_eq() {
-                self.remove_group(*child_id);
-                let node = self.replace(id, BlockNode::Leaf(meta));
-
-                return node;
-            }
-        }
-        None
-    }
-
-    pub fn iter(&'_ self) -> BlockTreeIter<'_> {
-        BlockTreeIter::new(self)
-    }
-
-    pub fn iter_layer(&'_ self, layer: u8) -> BlockLayerIter<'_> {
-        BlockLayerIter::new(self, layer)
-    }
-
-    pub fn chunk(&self, depth: u8) -> Chunk {
-        let d = MAX_LAYER_DEPTH - depth;
-        let mut vec = CubicVec::new(REGION_SIZE >> d);
-
-        for item in self.iter() {
-            if let BlockNode::Leaf(meta) = item.node {
-                let pos = item.pos >> d;
-                let size = BlockTree::block_size_on_layer(item.layer) >> d;
-                vec.fill(pos, pos + size, *meta);
-            }
-        }
-
-        vec
-    }
-}
-
-impl BlockNode {
-    #[inline]
-    pub fn is_leaf(&self) -> bool {
-        match self {
-            Self::Leaf(_) => true,
-            Self::Branch(_) => false,
-        }
-    }
-
-    #[inline]
-    pub fn is_branch(&self) -> bool {
-        match self {
-            Self::Leaf(_) => false,
-            Self::Branch(_) => true,
-        }
-    }
-}
-
-impl<'a> Iterator for BlockTreeIter<'a> {
-    type Item = BlockNodeInfo<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(BlockNodeInfo {
-                layer,
-                id: _,
-                node,
-                pos,
-                count,
-            }) = self.items.last_mut()
-            {
-                let layer = layer.wrapping_add(1);
-
-                if let BlockNode::Branch(id) = node {
-                    let idx = *count;
-
-                    if idx < 8 {
-                        *count += 1;
-                        let id = (*id).wrapping_add(idx as u32);
-
-                        if let Some(node) = self.tree.get(id) {
-                            let pos = (*pos).wrapping_add(
-                                BlockTree::child_pos_of_index(idx)
-                                    * BlockTree::block_size_on_layer(layer),
-                            );
-                            let last = BlockNodeInfo {
-                                layer,
-                                id,
-                                node,
-                                pos,
-                                count: 0,
-                            };
-
-                            if node.is_branch() {
-                                self.items.push(last.clone());
-                            }
-                            return Some(last);
-                        }
-                    } else {
-                        self.items.pop();
-                    }
-                }
-            } else {
-                return None;
-            }
-        }
-    }
-}
-
-impl<'a> BlockTreeIter<'a> {
-    pub fn new(tree: &'a BlockTree) -> Self {
-        Self {
-            tree,
-            items: vec![BlockNodeInfo::iter_root()],
-        }
-    }
-}
-
-impl<'a> Iterator for BlockLayerIter<'a> {
-    type Item = BlockNodeInfo<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(BlockNodeInfo {
-                layer,
-                id: _,
-                node,
-                pos,
-                count,
-            }) = self.items.last_mut()
-            {
-                let layer = layer.wrapping_add(1);
-
-                if let BlockNode::Branch(id) = node {
-                    let idx = *count;
-
-                    if idx < 8 {
-                        *count += 1;
-                        let id = (*id).wrapping_add(idx as u32);
-
-                        if let Some(node) = self.tree.get(id) {
-                            let pos = (*pos).wrapping_add(
-                                BlockTree::child_pos_of_index(idx)
-                                    * BlockTree::block_size_on_layer(layer),
-                            );
-                            let last = BlockNodeInfo {
-                                layer,
-                                id,
-                                node,
-                                pos,
-                                count: 0,
-                            };
-
-                            if layer == self.layer {
-                                return Some(last);
-                            } else if node.is_branch() {
-                                self.items.push(last);
-                            }
-                        }
-                    } else {
-                        self.items.pop();
-                    }
-                }
-            } else {
-                return None;
-            }
-        }
-    }
-}
-
-impl<'a> BlockLayerIter<'a> {
-    pub fn new(tree: &'a BlockTree, layer: u8) -> Self {
-        Self {
-            tree,
-            layer,
-            items: vec![BlockNodeInfo::iter_root()],
-        }
-    }
-}
-
-impl BlockNodeInfo<'_> {
-    const ITER_ROOT_NODE: BlockNode = BlockNode::Branch((0 as Id).wrapping_sub(7));
-    const ITER_ROOT_POS: RelBlockPos = RelBlockPos::ZERO.wrapping_sub(RelBlockPos::splat(64));
-
-    fn iter_root() -> Self {
-        Self {
-            layer: u8::MAX,
-            id: Id::MAX,
-            node: &Self::ITER_ROOT_NODE,
-            pos: Self::ITER_ROOT_POS,
-            count: 7,
-        }
-    }
-}
-
-pub struct Region<G: Generate> {
+pub struct Region {
     pos: RegionPos,
-    mode: RegionMode<G>,
+    lod: u8,
+    chunk: Option<Chunk>,
+    model: RegionModel,
+    generating: bool,
+    meshing: u8,
+    changed: Option<bool>,
+
+    gen_tx: Sender<GenTask>,
+    chunk_tx: Sender<GenResult>,
+    chunk_rx: Receiver<GenResult>,
     meshing_tx: Sender<MeshingTask>,
+    mesh_tx: Sender<MeshingResult>,
+    mesh_rx: Receiver<MeshingResult>,
 }
 
-pub enum RegionMode<G: Generate> {
-    Vec(VecMode),
-    Tree(TreeMode<G>),
+impl Render<NormTexVertex, IntTransInst> for Region {
+    fn rendered(&self) -> Vec<RenderItem<'_, NormTexVertex, IntTransInst>> {
+        self.model.rendered()
+    }
 }
 
-pub struct RegionContext<G: Generate> {
-    pub generator: Arc<G>,
-    pub meshing_tx: Sender<MeshingTask>,
-    pub depths: Option<(u8, u8)>,
+impl Render<AlphaVertex, IntTransInst> for Region {
+    fn rendered(&self) -> Vec<RenderItem<'_, AlphaVertex, IntTransInst>> {
+        self.model.rendered()
+    }
 }
 
-pub struct VecMode {
-    pub blocks: Arc<RwLock<CubicVec<Meta>>>,
-    dirty_chunks: HashSet<ChunkPos>,
-    touched: bool,
-    changed: bool,
+impl Region {
+    const SUBREGION_POSES: [SubRegionPos; SUBREGION_COUNT.pow(3) as usize] = [
+        SubRegionPos::new(0, 0, 0),
+        SubRegionPos::new(0, 0, 1),
+        SubRegionPos::new(0, 1, 0),
+        SubRegionPos::new(0, 1, 1),
+        SubRegionPos::new(1, 0, 0),
+        SubRegionPos::new(1, 0, 1),
+        SubRegionPos::new(1, 1, 0),
+        SubRegionPos::new(1, 1, 1),
+    ];
 
-    gen_rx: Option<Receiver<GenResultBatch<Area>>>,
-}
-
-pub struct TreeMode<G: Generate> {
-    pub origin: BlockPos,
-    pub tree: Arc<RwLock<BlockTree>>,
-    min_depth: u8,
-    max_depth: u8,
-    ongoing_splits: u8,
-    ongoing_folds: u8,
-    generator: Arc<G>,
-
-    split_tx: Sender<GenResultBatch<Split>>,
-    split_rx: Receiver<GenResultBatch<Split>>,
-    fold_tx: Sender<GenResultBatch<Fold>>,
-    fold_rx: Receiver<GenResultBatch<Fold>>,
-}
-
-impl<G: Generate> Region<G> {
-    pub fn new(pos: RegionPos, context: &RegionContext<G>, threads: &ThreadPool) -> Self {
-        let mode = RegionMode::new(pos, context, threads);
-
-        Self {
+    pub fn new(
+        canvas: &Canvas,
+        pos: RegionPos,
+        lod: u8,
+        gen_tx: Sender<GenTask>,
+        meshing_tx: Sender<MeshingTask>,
+    ) -> Self {
+        let (chunk_tx, chunk_rx) = bounded(1);
+        let (mesh_tx, mesh_rx) = bounded(8);
+        let mut new = Self {
             pos,
-            mode,
-            meshing_tx: context.meshing_tx.clone(),
-        }
-    }
+            lod,
+            chunk: None,
+            model: RegionModel::new(canvas, pos, lod),
+            generating: false,
+            meshing: 0,
+            changed: None,
 
-    pub fn get_block(&self, pos: RelBlockPos) -> Block {
-        match &self.mode {
-            RegionMode::Vec(mode) => {
-                let blocks = mode.blocks.read().unwrap();
-                Block::from_meta(*blocks.get(pos + 1))
-            }
-            
-            RegionMode::Tree(_) => Block::air(),
-        }
-    }
-
-    pub fn set_block(&mut self, pos: U8Vec3, block: Block) -> bool {
-        match &mut self.mode {
-            RegionMode::Vec(mode) => {
-                mode.set_block(pos, block);
-                true
-            }
-
-            RegionMode::Tree(_) => false,
-        }
-    }
-
-    pub fn update(&mut self, context: &RegionContext<G>, threads: &ThreadPool) -> bool {
-        match &mut self.mode {
-            RegionMode::Vec(mode) => {
-                if context.depths.is_none() || mode.touched {
-                    false
-                } else {
-                    self.mode = RegionMode::new(self.pos, context, threads);
-                    true
-                }
-            }
-            
-            RegionMode::Tree(mode) => {
-                if let Some((min_depth, max_depth)) = context.depths {
-                    mode.set_min_depth(min_depth, threads) | mode.set_max_depth(max_depth, threads)
-                } else {
-                    self.mode = RegionMode::new(self.pos, context, threads);
-                    true
-                }
-            }
-        }
-    }
-
-    pub fn poll(&mut self, threads: &ThreadPool) -> bool {
-        let finished = match &mut self.mode {
-            RegionMode::Vec(mode) => mode.poll_generation(),
-            
-            RegionMode::Tree(mode) => mode.poll_splits(threads) & mode.poll_folds(threads),
+            gen_tx,
+            chunk_tx,
+            chunk_rx,
+            meshing_tx,
+            mesh_tx,
+            mesh_rx,
         };
 
-        if finished {
-            let pos = self.pos;
-
-            match &mut self.mode {
-                RegionMode::Vec(mode) => {
-                    for chunk_pos in mode.dirty_chunks.drain() {
-                        let blocks = mode.blocks.clone();
-                        let meshing_tx = self.meshing_tx.clone();
-
-                        threads.spawn(move || {
-                            let origin = chunk_pos * VecMode::CHUNK_SIZE;
-                            let chunk = {
-                                let blocks = blocks.read().unwrap();
-                                blocks.part(origin, VecMode::CHUNK_SIZE + 2)
-                            };
-
-                            let task = MeshingTask {
-                                pos,
-                                chunk_pos: Some(chunk_pos),
-                                chunk,
-                            };
-                            if meshing_tx.try_send(task).is_err() {
-                                error!("Failed to send Meshing Task from Region at {}", pos);
-                            }
-                        });
-                    }
-                }
-                
-                RegionMode::Tree(mode) => {
-                    let tree = mode.tree.clone();
-                    let depth = mode.max_depth;
-                    let meshing_tx = self.meshing_tx.clone();
-
-                    threads.spawn(move || {
-                        let blocks = {
-                            let tree = tree.read().unwrap();
-                            tree.chunk(depth)
-                        };
-
-                        let mut chunk = CubicVec::new(blocks.side + 2);
-                        chunk.fit(U8Vec3::splat(1), &blocks);
-
-                        let task = MeshingTask {
-                            pos,
-                            chunk_pos: None,
-                            chunk,
-                        };
-                        if meshing_tx.try_send(task).is_err() {
-                            error!("Failed to send Meshing Task from Region at {}", pos);
-                        }
-                    });
-                }
-            }
+        if new.load().is_err() {
+            new.begin_generation();
         }
-
-        finished
+        new
     }
-    
-    pub fn save(&mut self) {
-        match &mut self.mode {
-            RegionMode::Vec(mode) => {
-                if mode.changed {
-                    if mode.save(self.pos).is_err() {
-                        error!("Failed to save region at {}", self.pos);
-                    }
-                    
-                    mode.changed = false;
-                }
-            }
-            
-            RegionMode::Tree(_) => (),
-        }
-    }
-    
-    pub fn is_vec(&self) -> bool {
-        match self.mode {
-            RegionMode::Vec(_) => true,
-            RegionMode::Tree(_) => false,
-        }
-    }
-    
-    pub fn is_tree(&self) -> bool {
-        match self.mode {
-            RegionMode::Vec(_) => false,
-            RegionMode::Tree(_) => true,
-        }
-    }
-}
 
-impl<G: Generate> RegionMode<G> {
-    fn new(pos: RegionPos, context: &RegionContext<G>, threads: &ThreadPool) -> Self {
-        if let Ok(mode) = VecMode::load(pos) {
-            return Self::Vec(mode);
-        }
-        
-        match context.depths {
-            Some((min_depth, max_depth)) => Self::Tree(TreeMode::new(
-                pos,
-                &context.generator,
-                min_depth,
-                max_depth,
-                threads,
-            )),
-            None => Self::Vec(VecMode::new(pos, &context.generator, threads)),
-        }
-    }
-}
-
-impl VecMode {
-    pub const CHUNK_SIZE: u8 = 16;
-    const CHUNK_POSES: [ChunkPos; 64] = Self::chunk_poses();
-    
-    const fn chunk_poses() -> [ChunkPos; 64] {
-        let mut poses = [RelBlockPos::ZERO; 64];
-
-        let mut x = 0;
-        while x < 4 {
-            let mut y = 0;
-            while y < 4 {
-                let mut z = 0;
-                while z < 4 {
-                    let idx = x as usize + ((y as usize) << 2) + ((z as usize) << 4);
-                    poses[idx] = RelBlockPos::new(x, y, z);
-                    z += 1;
-                }
-                y += 1;
-            }
-            x += 1;
-        }
-
-        poses
-    }
-    
     #[inline]
-    fn pos_influence(pos: U8Vec3) -> SmallVec<[ChunkPos; 8]> {
+    pub const fn block_size_on_lod(lod: u8) -> u8 {
+        1 << lod
+    }
+
+    #[inline]
+    pub const fn chunk_size_on_lod(lod: u8) -> u8 {
+        (REGION_SIZE >> lod) + 2
+    }
+
+    #[inline]
+    fn pos_influence(pos: U8Vec3) -> SmallVec<[SubRegionPos; SUBREGION_COUNT.pow(3) as usize]> {
         let mut influenced = SmallVec::new();
-        
+
         fn range(b: u8) -> (u8, u8) {
             let b = b as i16;
-            let min = ((b - 17) / 16).max(0);
-            let max = (b / 16).min(3);
+            let s = SUBREGION_SIZE as i16;
+            let min = ((b - s - 1) / s).max(0);
+            let max = (b / s).min(SUBREGION_COUNT as i16 - 1);
             (min as u8, max as u8)
         }
-        
+
         let (minx, maxx) = range(pos.x);
         let (miny, maxy) = range(pos.y);
         let (minz, maxz) = range(pos.z);
-        
+
         for x in minx..=maxx {
             for y in miny..=maxy {
                 for z in minz..=maxz {
-                    influenced.push(ChunkPos::new(x, y, z));
+                    influenced.push(SubRegionPos::new(x, y, z));
                 }
             }
         }
-        
+
         influenced
     }
 
-    fn new<G: Generate>(pos: RegionPos, generator: &Arc<G>, threads: &ThreadPool) -> Self {
-        let origin = pos * REGION_SIZE as i32;
-        let blocks = CubicVec::new(REGION_SIZE + 2);
-        let (gen_tx, gen_rx) = bounded(1);
-
-        let region = Self {
-            blocks: Arc::new(RwLock::new(blocks)),
-            dirty_chunks: HashSet::from(Self::CHUNK_POSES),
-            touched: false,
-            changed: false,
-
-            gen_rx: Some(gen_rx),
-        };
-
-        let generator = generator.clone();
-        threads.spawn(move || {
-            let tasks = GenTaskBatch::new_near(origin);
-            let results = generator.perform_batch(tasks);
-            if gen_tx.try_send(results).is_err() {
-                error!("Failed to send Generation results to Region at {}", origin);
-            }
-        });
-
-        region
+    pub fn bound(&self) -> AABB<Vec3> {
+        AABB {
+            min: (self.pos * REGION_SIZE as i32).as_vec3(),
+            max: ((self.pos + 1) * REGION_SIZE as i32).as_vec3(),
+        }
     }
-    
-    fn load(pos: RegionPos) -> Result<Self> {
-        let mut file = File::open(&format!("saves/{}.{}.{}.regn", pos.x, pos.y, pos.z))?;
-        
+
+    pub fn get_block(&self, pos: LocalPos) -> Block {
+        match &self.chunk {
+            None => Block::air(),
+            Some(chunk) => Block::from_meta(*chunk.get(pos + 1)),
+        }
+    }
+
+    pub fn set_block(&mut self, pos: LocalPos, block: Block) -> bool {
+        match &mut self.chunk {
+            None => false,
+
+            Some(chunk) => {
+                chunk.set(pos, block.to_meta());
+                self.changed = Some(true);
+                self.begin_meshing(Self::pos_influence(pos));
+                true
+            }
+        }
+    }
+
+    fn begin_generation(&mut self) {
+        match self.gen_tx.try_send(GenTask {
+            pos: self.pos,
+            lod: self.lod,
+            tx: self.chunk_tx.clone(),
+        }) {
+            Ok(_) => {
+                self.generating = true;
+                self.meshing = 0;
+            }
+
+            Err(e) => error!(
+                "Failed to send Generation Task from Region {}: {}",
+                self.pos, e
+            ),
+        }
+    }
+
+    fn begin_meshing(&mut self, poses: SmallVec<[SubRegionPos; SUBREGION_COUNT.pow(3) as usize]>) {
+        match self.lod {
+            0 => {
+                if let Some(chunk) = &self.chunk {
+                    for pos in poses {
+                        match self.meshing_tx.try_send(MeshingTask {
+                            lod: self.lod,
+                            pos: Some(pos),
+                            chunk: chunk.part(pos * SUBREGION_SIZE, U8Vec3::splat(SUBCHUNK_SIZE)),
+                            tx: self.mesh_tx.clone(),
+                        }) {
+                            Ok(_) => self.meshing += 1,
+                            Err(e) => error!(
+                                "Failed to send Meshing Task from Region {}: {}",
+                                self.pos, e
+                            ),
+                        }
+                    }
+                }
+            }
+
+            1.. => {
+                if let Some(chunk) = self.chunk.take() {
+                    match self.meshing_tx.try_send(MeshingTask {
+                        lod: self.lod,
+                        pos: None,
+                        chunk,
+                        tx: self.mesh_tx.clone(),
+                    }) {
+                        Ok(_) => self.meshing += 1,
+                        Err(e) => error!(
+                            "Failed to send Meshing Task from Region {}: {}",
+                            self.pos, e
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn update(&mut self, lod: u8) -> bool {
+        if self.lod == lod || self.changed.is_some() {
+            false
+        } else {
+            self.lod = lod;
+            self.begin_generation();
+            true
+        }
+    }
+
+    pub fn poll(&mut self) -> bool {
+        if self.generating
+            && let Ok(result) = self.chunk_rx.try_recv()
+        {
+            if result.lod == self.lod {
+                self.chunk = Some(result.chunk);
+                self.generating = false;
+            }
+        }
+
+        if !self.generating {
+            self.begin_meshing(SmallVec::from(Self::SUBREGION_POSES));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn pre_render(&mut self, canvas: &Canvas) -> bool {
+        if self.meshing > 0 {
+            for result in self.mesh_rx.try_iter() {
+                if result.lod == self.lod {
+                    self.model.update(canvas, result);
+                    self.meshing = self.meshing.saturating_sub(1);
+                }
+            }
+        }
+
+        self.meshing == 0 && self.model.poll(self.lod)
+    }
+
+    pub fn save(&mut self) -> Result<()> {
+        if let Some(changed) = self.changed
+            && changed
+        {
+            let mut file = File::create(&format!(
+                "saves/{}.{}.{}.regn",
+                self.pos.x, self.pos.y, self.pos.z
+            ))?;
+
+            file.write_all(b"REGN")?;
+
+            file.write_all(&0u32.to_le_bytes())?;
+
+            let mut block_data = Vec::new();
+            let mut meta = Meta::MAX;
+            let mut count: u16 = 0;
+
+            if let Some(chunk) = &self.chunk {
+                for &m in chunk.vec.iter() {
+                    if m == meta && count < u16::MAX {
+                        count += 1;
+                    } else {
+                        if count > 0 {
+                            block_data.extend_from_slice(&meta.to_le_bytes());
+                            block_data.extend_from_slice(&count.to_le_bytes());
+                        }
+
+                        meta = m;
+                        count = 1;
+                    }
+                }
+
+                if count > 0 {
+                    block_data.extend_from_slice(&meta.to_le_bytes());
+                    block_data.extend_from_slice(&count.to_le_bytes());
+                }
+
+                file.write_all(&block_data)?;
+                file.sync_all()?;
+
+                self.changed = Some(false);
+            } else {
+                return Err(anyhow!("Chunk does not exist"));
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn load(&mut self) -> Result<()> {
+        let mut file = File::open(&format!(
+            "saves/{}.{}.{}.regn",
+            self.pos.x, self.pos.y, self.pos.z
+        ))?;
+
         let mut magic_data = [0; 4];
         file.read_exact(&mut magic_data)?;
         let magic = str::from_utf8(&magic_data).unwrap_or("ERROR");
-        
+
         let mut version_data = [0; 4];
         file.read_exact(&mut version_data)?;
         let version = u32::from_le_bytes(version_data);
-        
+
         if magic != "REGN" || version != 0 {
-            return Err(Error::from(io::Error::new(
-                io::ErrorKind::Other,
-                "Region file header is invalid",
-            )));
+            return Err(anyhow!("File invalid"));
         }
-        
+
         let mut block_data = Vec::new();
         file.read_to_end(&mut block_data)?;
-        
+
         if block_data.len() % 4 != 0 {
-            return Err(Error::from(io::Error::new(
-                io::ErrorKind::Other,
-                "Region file is corrupted",
-            )));
+            return Err(anyhow!("File corrupted"));
         }
-        
+
         let mut blocks = Vec::new();
-        
+
         for i in 0..block_data.len() / 4 {
             let j = i * 4;
             let meta = Meta::from_le_bytes(block_data[j..j + 2].try_into()?);
             let count = u16::from_le_bytes(block_data[j + 2..j + 4].try_into()?);
             blocks.resize(blocks.len() + count as usize, meta);
         }
-        
-        let blocks = Chunk {
-            side: REGION_SIZE + 2,
-            vec: blocks,
-        };
-        
-        Ok(Self {
-            blocks: Arc::new(RwLock::new(blocks)),
-            dirty_chunks: HashSet::from(Self::CHUNK_POSES),
-            touched: true,
-            changed: false,
-            
-            gen_rx: None,
-        })
-    }
-    
-    fn save(&self, pos: RegionPos) -> Result<()> {
-        let mut file = File::create(&format!("saves/{}.{}.{}.regn", pos.x, pos.y, pos.z))?;
-        
-        file.write_all(b"REGN")?;
-        
-        file.write_all(&0u32.to_le_bytes())?;
-        
-        let mut block_data = Vec::new();
-        let mut meta = Meta::MAX;
-        let mut count: u16 = 0;
-        
-        let blocks = self.blocks.read().unwrap();
-        
-        for &m in blocks.vec.iter() {
-            if m == meta && count < u16::MAX {
-                count += 1;
-            } else {
-                if count > 0 {
-                    block_data.extend_from_slice(&meta.to_le_bytes());
-                    block_data.extend_from_slice(&count.to_le_bytes());
-                }
-                
-                meta = m;
-                count = 1;
-            }
-        }
-        
-        if count > 0 {
-            block_data.extend_from_slice(&meta.to_le_bytes());
-            block_data.extend_from_slice(&count.to_le_bytes());
-        }
-        
-        file.write_all(&block_data)?;
-        
-        file.sync_all()?;
-        Ok(())
-    }
-    
-    fn get_block(&self, pos: RelBlockPos) -> Block {
-        let blocks = self.blocks.read().unwrap();
-        Block::from_meta(*blocks.get(pos + 1))
-    }
-    
-    fn set_block(&mut self, pos: U8Vec3, block: Block) {
-        let mut blocks = self.blocks.write().unwrap();
-        blocks.set(pos, block.to_meta());
-        self.dirty_chunks.extend(Self::pos_influence(pos));
-        self.touched = true;
-        self.changed = true;
-    }
 
-    fn poll_generation(&mut self) -> bool {
-        match &self.gen_rx {
-            Some(gen_rx) => {
-                if let Ok(results) = gen_rx.try_recv() {
-                    for result in results.results {
-                        let mut chunk = self.blocks.write().unwrap();
-                        *chunk = result.output;
-                    }
-                    
-                    self.gen_rx = None;
-                    true
-                } else {
-                    false
-                }
-            }
-            
-            None => true,
-        }
+        self.chunk = Some(Chunk {
+            size: U8Vec3::splat(REGION_SIZE + 2),
+            vec: blocks,
+        });
+        self.changed = Some(false);
+
+        Ok(())
     }
 }
 
-impl<G: Generate> TreeMode<G> {
-    fn new(
-        pos: RegionPos,
-        generator: &Arc<G>,
-        min_depth: u8,
-        max_depth: u8,
-        threads: &ThreadPool,
-    ) -> Self {
-        assert!(min_depth <= max_depth && max_depth <= MAX_LAYER_DEPTH);
+pub struct RegionModel {
+    near: Option<Volume<SwapPair<ChunkModel>>>,
+    far: Option<SwapPair<ChunkModel>>,
+    pos: Instances<IntTransInst>,
+    on_far: bool,
+}
 
-        let origin = pos * REGION_SIZE as i32;
-        let generator = generator.clone();
-        let center = origin + BlockTree::block_size_on_layer(1) as i32;
-        let meta = generator.generate(center);
-        let tree = Arc::new(RwLock::new(BlockTree::new(meta)));
-        let (split_tx, split_rx) = bounded(8);
-        let (fold_tx, fold_rx) = bounded(8);
+#[derive(Clone)]
+pub struct ChunkModel {
+    blocks: Geometry<NormTexVertex>,
+    occlusion: Geometry<AlphaVertex>,
+}
 
-        let mut region = Self {
-            origin,
-            tree,
-            min_depth,
-            max_depth,
-            ongoing_splits: 0,
-            ongoing_folds: 0,
-            generator,
+impl Render<NormTexVertex, IntTransInst> for RegionModel {
+    fn rendered(&self) -> Vec<RenderItem<'_, NormTexVertex, IntTransInst>> {
+        let mut items = Vec::new();
 
-            split_tx,
-            split_rx,
-            fold_tx,
-            fold_rx,
+        match self.on_far {
+            false => {
+                if let Some(models) = &self.near {
+                    for pair in models.vec.iter() {
+                        if let Some(model) = pair.get() {
+                            items.push(RenderItem {
+                                geometry: &model.blocks,
+                                instances: &self.pos,
+                            });
+                        }
+                    }
+                }
+            }
+
+            true => {
+                if let Some(pair) = &self.far {
+                    if let Some(model) = pair.get() {
+                        items.push(RenderItem {
+                            geometry: &model.blocks,
+                            instances: &self.pos,
+                        });
+                    }
+                }
+            }
+        }
+
+        items
+    }
+}
+
+impl Render<AlphaVertex, IntTransInst> for RegionModel {
+    fn rendered(&self) -> Vec<RenderItem<'_, AlphaVertex, IntTransInst>> {
+        let mut items = Vec::new();
+
+        match self.on_far {
+            false => {
+                if let Some(models) = &self.near {
+                    for pair in models.vec.iter() {
+                        if let Some(model) = pair.get() {
+                            items.push(RenderItem {
+                                geometry: &model.occlusion,
+                                instances: &self.pos,
+                            });
+                        }
+                    }
+                }
+            }
+
+            true => {
+                if let Some(pair) = &self.far {
+                    if let Some(model) = pair.get() {
+                        items.push(RenderItem {
+                            geometry: &model.occlusion,
+                            instances: &self.pos,
+                        });
+                    }
+                }
+            }
+        }
+
+        items
+    }
+}
+
+impl RegionModel {
+    fn new(canvas: &Canvas, pos: RegionPos, lod: u8) -> Self {
+        Self {
+            near: None,
+            far: None,
+            pos: [IntTransInst {
+                pos: pos * REGION_SIZE as i32,
+            }]
+            .instances(canvas, "region"),
+            on_far: lod > 0,
+        }
+    }
+
+    fn update(&mut self, canvas: &Canvas, result: MeshingResult) {
+        let model = if result.blocks.is_empty() || result.occlusion.is_empty() {
+            None
+        } else {
+            Some(ChunkModel {
+                blocks: result.blocks.geometry(canvas, "block"),
+                occlusion: result.occlusion.geometry(canvas, "occlusion"),
+            })
         };
 
-        if max_depth > 0 {
-            region.split_layer(0, threads);
-        }
-
-        region
-    }
-
-    fn split_layer(&mut self, layer: u8, threads: &ThreadPool) {
-        let generator = self.generator.clone();
-        let origin = self.origin;
-        let split_tx = self.split_tx.clone();
-        let tree = self.tree.clone();
-
-        threads.spawn(move || {
-            let tasks = GenTaskBatch::new_far(origin, tree, layer);
-            let results = generator.perform_batch(tasks);
-            if split_tx.try_send(results).is_err() {
-                error!("Failed to send Split results to Region at {}", origin);
+        match result.pos {
+            None => self.far.get_or_insert_default().set(model, 4),
+            Some(pos) => {
+                self.near
+                    .get_or_insert(Volume::new(U8Vec3::splat(SUBREGION_COUNT)))
+                    .get_mut(pos)
+                    .set(model, 4);
             }
-        });
-
-        self.ongoing_splits += 1;
+        }
     }
 
-    fn poll_splits(&mut self, threads: &ThreadPool) -> bool {
-        if self.ongoing_splits > 0 {
-            while let Ok(batch) = self.split_rx.try_recv() {
-                self.ongoing_splits -= 1;
-                let layer = batch.context;
+    fn poll(&mut self, lod: u8) -> bool {
+        let is_far = lod > 0;
 
-                if layer > self.max_depth {
-                    continue;
-                }
-
-                let force = layer <= self.min_depth;
-                let mut next = Vec::new();
-
-                {
-                    let mut tree = self.tree.write().unwrap();
-                    for result in batch.results {
-                        if let Some(child_id) = tree.split(result.id, result.output, force) {
-                            next.push((result, child_id));
-                        }
+        let finished = match is_far {
+            false => {
+                if let Some(models) = &mut self.near {
+                    let mut finished = true;
+                    for pair in models.vec.iter_mut() {
+                        finished &= pair.update();
                     }
+                    finished
+                } else {
+                    true
                 }
+            }
 
-                if layer < self.max_depth && !next.is_empty() {
-                    let generator = self.generator.clone();
-                    let origin = self.origin;
-                    let split_tx = self.split_tx.clone();
-
-                    threads.spawn(move || {
-                        let offset = BlockTree::block_size_on_layer(layer);
-                        let mut tasks = Vec::new();
-                        for (result, child_id) in next {
-                            tasks.extend(Split::further_on(&result, child_id, offset));
-                        }
-                        let tasks = GenTaskBatch {
-                            context: layer,
-                            tasks,
-                            _marker: PhantomData,
-                        };
-                        let results = generator.perform_batch(tasks);
-                        if split_tx.try_send(results).is_err() {
-                            error!("Failed to send Split results to Region at {}", origin);
-                        }
-                    });
-
-                    self.ongoing_splits += 1;
+            true => {
+                if let Some(pair) = &mut self.far {
+                    pair.update()
+                } else {
+                    true
                 }
+            }
+        };
+
+        if self.on_far != is_far && finished {
+            self.on_far = is_far;
+            if is_far {
+                self.near = None;
+            } else {
+                self.far = None;
             }
         }
 
-        self.ongoing_splits == 0
-    }
-
-    fn fold_layer(&mut self, layer: u8, threads: &ThreadPool) {
-        let generator = self.generator.clone();
-        let origin = self.origin;
-        let fold_tx = self.fold_tx.clone();
-        let tree = self.tree.clone();
-
-        threads.spawn(move || {
-            let tasks = GenTaskBatch::new_far(origin, tree, layer);
-            let results = generator.perform_batch(tasks);
-            if fold_tx.try_send(results).is_err() {
-                error!("Failed to send Fold results to Region at {}", origin);
-            }
-        });
-
-        self.ongoing_folds += 1;
-    }
-
-    fn poll_folds(&mut self, threads: &ThreadPool) -> bool {
-        if self.ongoing_folds > 0 {
-            while let Ok(batch) = self.fold_rx.try_recv() {
-                self.ongoing_folds -= 1;
-                let layer = batch.context;
-
-                if layer < self.min_depth {
-                    continue;
-                }
-
-                let force = layer >= self.max_depth;
-                {
-                    let mut tree = self.tree.write().unwrap();
-                    for result in batch.results {
-                        tree.fold(result.id, result.output, force);
-                    }
-                }
-
-                if layer > self.max_depth {
-                    self.fold_layer(layer - 1, threads);
-                }
-            }
-        }
-
-        self.ongoing_folds == 0
-    }
-
-    fn set_min_depth(&mut self, depth: u8, threads: &ThreadPool) -> bool {
-        assert!(depth <= MAX_LAYER_DEPTH);
-        let cur_depth = self.min_depth;
-        self.min_depth = depth;
-
-        if depth > cur_depth {
-            self.split_layer(cur_depth, threads);
-            return true;
-        }
-
-        if depth < cur_depth {
-            self.fold_layer(cur_depth, threads);
-            return true;
-        }
-
-        false
-    }
-
-    fn set_max_depth(&mut self, depth: u8, threads: &ThreadPool) -> bool {
-        assert!(depth <= MAX_LAYER_DEPTH);
-        let cur_depth = self.max_depth;
-        self.max_depth = depth;
-
-        if depth < cur_depth {
-            self.fold_layer(cur_depth, threads);
-            return true;
-        }
-
-        if depth > cur_depth {
-            self.split_layer(cur_depth, threads);
-            return true;
-        }
-
-        false
+        finished
     }
 }

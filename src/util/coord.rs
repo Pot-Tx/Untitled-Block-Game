@@ -1,7 +1,7 @@
-use std::fmt::Debug;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use num_traits::*;
+use std::fmt::Debug;
 use std::ops::*;
 
 #[derive(Clone, Copy, Eq, PartialEq, Debug)]
@@ -193,10 +193,10 @@ pub trait Coord:
         + DivAssign;
 
     const DIM: usize;
-    
+
     #[must_use]
     fn min_element(self) -> Self::Scalar;
-    
+
     #[must_use]
     fn max_element(self) -> Self::Scalar;
 }
@@ -227,8 +227,8 @@ pub trait Coord3: Coord {
 
     #[must_use]
     fn cross(self, other: Self) -> Self;
-    
-    fn cuboid(min: Self, max: Self) -> [Self; 8];
+
+    fn corners(min: Self, max: Self) -> [Self; 8];
 }
 
 pub trait SCoord3: SCoord + Coord3 {}
@@ -246,12 +246,12 @@ macro_rules! impl_coord_for {
             impl Coord for $vec {
                 type Scalar = $scalar;
                 const DIM: usize = $dim;
-                
+
                 #[inline]
                 fn min_element(self) -> Self::Scalar {
                     self.min_element()
                 }
-                
+
                 #[inline]
                 fn max_element(self) -> Self::Scalar {
                     self.max_element()
@@ -340,11 +340,11 @@ macro_rules! impl_coord3_for {
                 fn cross(self, other: Self) -> Self {
                     self.cross(other)
                 }
-                
+
                 #[inline]
-                fn cuboid(min: Self, max: Self) -> [Self; 8] {
+                fn corners(min: Self, max: Self) -> [Self; 8] {
                     let (x0, y0, z0, x1, y1, z1) = (min.x, min.y, min.z, max.x, max.y, max.z);
-                    
+
                     [
                         Self::new(x0, y0, z0),
                         Self::new(x0, y0, z1),

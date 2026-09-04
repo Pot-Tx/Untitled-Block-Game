@@ -34,7 +34,7 @@ impl ResourceManager {
         let id = TypeId::of::<R>();
         self.resources.insert(id, ErasedBox::new(value));
     }
-    
+
     pub fn get<R: Resource>(&self) -> &R {
         let id = TypeId::of::<R>();
         self.resources
@@ -42,7 +42,7 @@ impl ResourceManager {
             .expect(&format!("Resource with id {:?} not found", id))
             .cast()
     }
-    
+
     pub fn get_mut<R: Resource>(&self) -> &mut R {
         let id = TypeId::of::<R>();
         self.resources

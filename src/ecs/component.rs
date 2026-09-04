@@ -101,7 +101,7 @@ impl ComponentManager {
     pub fn get_mut<C: Component>(&mut self) -> &mut ErasedComponent {
         self.by_id_mut(TypeId::of::<C>())
     }
-    
+
     pub fn remove_all(&mut self, entity: Id) {
         self.components.iter_mut().for_each(|(_, c)| {
             c.remove_and_drop(entity);
@@ -135,7 +135,7 @@ impl ErasedComponent {
             ComponentStorage::Hash(map) => map.get_mut(entity),
         }
     }
-    
+
     pub fn iter<C: Component>(&self) -> ComponentIter<'_, C> {
         assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
@@ -143,7 +143,7 @@ impl ErasedComponent {
             ComponentStorage::Hash(map) => ComponentIter::Hash(map.iter()),
         }
     }
-    
+
     pub fn iter_mut<C: Component>(&self) -> ComponentIterMut<'_, C> {
         assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {

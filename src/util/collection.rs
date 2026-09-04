@@ -36,6 +36,11 @@ impl SparseSet {
     }
 
     #[inline]
+    pub fn len(&self) -> usize {
+        self.dense.len()
+    }
+
+    #[inline]
     pub fn find(&self, id: Id) -> Option<Id> {
         if let Some(&idx) = self.sparse.get(id as usize) {
             if let Some(&id1) = self.dense.get(idx as usize)
@@ -114,6 +119,11 @@ impl<T> DenseMap<T> {
     #[inline]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.items.len()
     }
 
     #[inline]
@@ -224,37 +234,36 @@ impl<'a, T: 'a> Iterator for DenseMapIterMut<'a, T> {
 }
 
 #[derive(Clone)]
-pub struct CubicVec<T> {
-    pub side: u8,
+pub struct Volume<T> {
+    pub size: U8Vec3,
     pub vec: Vec<T>,
 }
 
-impl<T: Clone + Default> CubicVec<T> {
+impl<T: Clone + Default> Volume<T> {
     #[inline]
-    pub fn new(side: u8) -> Self {
+    pub fn new(size: U8Vec3) -> Self {
         Self {
-            side,
-            vec: vec![T::default(); (side as usize) * (side as usize) * (side as usize)],
+            size,
+            vec: vec![T::default(); size.as_usizevec3().element_product()],
         }
     }
 
     #[inline]
-    pub fn part(&self, min: U8Vec3, side: u8) -> CubicVec<T> {
-        let max = min + side;
-        assert!(max.x <= self.side && max.y <= self.side && max.z <= self.side);
+    pub fn part(&self, min: U8Vec3, size: U8Vec3) -> Volume<T> {
+        let max = min + size;
+        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
 
-        let n = self.side as usize;
-        let m = side as usize;
-        let dz = min.z as usize;
-        let dy = min.y as usize;
-        let mut part = CubicVec::<T>::new(side);
+        let [w, h, _] = self.size.as_usizevec3().to_array();
+        let [sw, sh, sd] = size.as_usizevec3().to_array();
+        let [dx, dy, dz] = min.as_usizevec3().to_array();
 
-        let x = min.x as usize;
-        for z in 0..m {
-            for y in 0..m {
-                let dst = z * m * m + y * m;
-                let src = (z + dz) * n * n + (y + dy) * n + x;
-                part.vec[dst..dst + m].clone_from_slice(&self.vec[src..src + m]);
+        let mut part = Volume::<T>::new(size);
+
+        for z in 0..sd {
+            for y in 0..sh {
+                let dst = z * sh * sw + y * sw;
+                let src = (z + dz) * h * w + (y + dy) * w + dx;
+                part.vec[dst..dst + sw].clone_from_slice(&self.vec[src..src + sw]);
             }
         }
 
@@ -262,76 +271,75 @@ impl<T: Clone + Default> CubicVec<T> {
     }
 }
 
-impl<T: Clone> CubicVec<T> {
+impl<T: Clone> Volume<T> {
     #[inline]
-    pub fn splat(side: u8, value: T) -> Self {
+    pub fn splat(size: U8Vec3, value: T) -> Self {
         Self {
-            side,
-            vec: vec![value; (side as usize) * (side as usize) * (side as usize)],
+            size,
+            vec: vec![value; size.as_usizevec3().element_product()],
         }
     }
 
     #[inline]
     pub fn fill(&mut self, min: U8Vec3, max: U8Vec3, value: T) {
-        assert!(min.x < self.side && min.y < self.side && min.z < self.side);
-        assert!(max.x <= self.side && max.y <= self.side && max.z <= self.side);
+        assert!(min.x < self.size.x && min.y < self.size.y && min.z < self.size.z);
+        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
 
-        let n = self.side as usize;
+        let [w, h, _] = self.size.as_usizevec3().to_array();
         let min = USizeVec3::from(min);
         let max = USizeVec3::from(max);
 
         for z in min.z..max.z {
             for y in min.y..max.y {
-                let offset = z * n * n + y * n;
+                let offset = z * h * w + y * w;
                 self.vec[offset + min.x..offset + max.x].fill(value.clone());
             }
         }
     }
 
     #[inline]
-    pub fn fit(&mut self, min: U8Vec3, part: &CubicVec<T>) {
-        let max = min + part.side;
-        assert!(max.x <= self.side && max.y <= self.side && max.z <= self.side);
+    pub fn fit(&mut self, min: U8Vec3, part: &Volume<T>) {
+        let max = min + part.size;
+        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
 
-        let n = self.side as usize;
-        let m = part.side as usize;
-        let dz = min.z as usize;
-        let dy = min.y as usize;
+        let [w, h, _] = self.size.as_usizevec3().to_array();
+        let [sw, sh, sd] = part.size.as_usizevec3().to_array();
+        let [dx, dy, dz] = min.as_usizevec3().to_array();
 
-        let x = min.x as usize;
-        for z in 0..m {
-            for y in 0..m {
-                let src = z * m * m + y * m;
-                let dst = (z + dz) * n * n + (y + dy) * n + x;
-                self.vec[dst..dst + m].clone_from_slice(&part.vec[src..src + m]);
+        for z in 0..sd {
+            for y in 0..sh {
+                let src = z * sh * sw + y * sw;
+                let dst = (z + dz) * h * w + (y + dy) * w + dx;
+                self.vec[dst..dst + sw].clone_from_slice(&part.vec[src..src + sw]);
             }
         }
     }
 }
 
-impl<T> CubicVec<T> {
-    pub fn from_fn<F: Fn(U8Vec3) -> T>(side: u8, pos_to_item: F) -> Self {
-        let n = side as usize;
-        let vec = (0..n * n * n)
+impl<T> Volume<T> {
+    pub fn from_fn<F: Fn(U8Vec3) -> T>(size: U8Vec3, pos_to_item: F) -> Self {
+        let [w, h, d] = size.as_usizevec3().to_array();
+        let total = w * h * d;
+        let vec = (0..total)
             .map(|idx| {
                 let pos = U8Vec3::new(
-                    (idx % n) as u8,
-                    ((idx / n) % n) as u8,
-                    (idx / (n * n)) as u8,
+                    (idx % w) as u8,
+                    ((idx / w) % h) as u8,
+                    (idx / (w * h)) as u8,
                 );
                 pos_to_item(pos)
             })
             .collect();
 
-        Self { side, vec }
+        Self { size, vec }
     }
 
     #[inline]
-    pub const fn idx_of_pos(&self, pos: U8Vec3) -> usize {
-        assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
-
-        let n = self.side as usize;
-        pos.x as usize + pos.y as usize * n + pos.z as usize * n * n
+    pub fn idx_of_pos(&self, pos: U8Vec3) -> usize {
+        assert!(pos.x < self.size.x && pos.y < self.size.y && pos.z < self.size.z);
+        let w = self.size.x as usize;
+        let h = self.size.y as usize;
+        pos.x as usize + pos.y as usize * w + pos.z as usize * w * h
     }
 
     #[inline]

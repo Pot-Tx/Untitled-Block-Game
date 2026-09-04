@@ -51,7 +51,7 @@ impl Camera {
 
     pub fn transform(
         &mut self,
-	    canvas: &Canvas,
+        canvas: &Canvas,
         pos: &Position,
         rot: &Rotation,
         vel: &Velocity,
@@ -59,15 +59,15 @@ impl Camera {
     ) {
         let pos = pos.0 - vel.0 * (1.0 - partial_tick.0);
         let rot = rot.0;
-	    let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
+        let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
 
         let trans = Mat4::translation(-pos[0], -pos[1], -pos[2]);
         let rot = Mat4::rotation(-rot[0], -rot[1], -rot[2]);
-	    let proj = Mat4::projection(self.near, self.far, self.fov, aspect);
-	    
-	    let mat = proj * rot * trans;
-	    let queue = &canvas.queue;
-	    queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[mat]));
+        let proj = Mat4::projection(self.near, self.far, self.fov, aspect);
+
+        let mat = proj * rot * trans;
+        let queue = &canvas.queue;
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[mat]));
 
         let dy = self.far * (self.fov / 2.0).tan();
         let dx = dy * aspect;
@@ -87,6 +87,51 @@ impl Camera {
             Plane::from_points(back, br, bl, orient),
             Plane::from_points(bl, br, tl, orient),
         ];
+    }
+}
+
+pub struct ViewPort {
+    width: f32,
+    height: f32,
+
+    pub buffer: Buffer,
+    pub transform: BindSet<Transformation>,
+}
+
+impl Resource for ViewPort {}
+
+impl ViewPort {
+    pub fn new(canvas: &Canvas) -> Self {
+        let buffer = Buffer::new(
+            canvas,
+            &BufferConfig {
+                name: "viewport",
+                init: BufferInit::Content(&[Mat4::default()]),
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            },
+        );
+        let transform = BindSet::new(
+            canvas,
+            &BindSetConfig {
+                name: "viewport",
+                content: &buffer,
+            },
+        );
+
+        Self {
+            width: 256.0,
+            height: 256.0,
+
+            buffer,
+            transform,
+        }
+    }
+
+    pub fn transform(&mut self, canvas: &Canvas) {
+        let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
+        let mat = Mat4::viewport(self.width, self.height, aspect);
+        let queue = &canvas.queue;
+        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[mat]));
     }
 }
 
@@ -116,14 +161,14 @@ impl System for CameraTransformer {
         CompRead<Rotation>,
         CompRead<Velocity>,
     );
-	type ResQuery = (ResRead<Canvas>, ResWrite<Camera>, ResRead<PartialTick>);
+    type ResQuery = (ResRead<Canvas>, ResWrite<Camera>, ResRead<PartialTick>);
 
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-	    res.1.transform(res.0, entry.2, entry.3, entry.4, res.2);
+        res.1.transform(res.0, entry.2, entry.3, entry.4, res.2);
 
         None
     }

@@ -48,6 +48,51 @@ impl Tex {
             data,
         })
     }
+
+    pub fn create_texture_sampler<'a>(
+        &self,
+        canvas: &Canvas,
+        name: &'a str,
+    ) -> BindSet<TextureSampler> {
+        let texture = Texture::new(
+            canvas,
+            &TextureConfig {
+                name,
+                texs: vec![self],
+                width: self.width,
+                height: self.height,
+                mip_level_count: 1,
+                storage: false,
+            },
+        );
+
+        let texture_view = TextureView::new(
+            &texture,
+            &TextureViewConfig {
+                name,
+                dimension: TextureViewDimension::D2,
+                mip_level: None,
+            },
+        );
+
+        let sampler = Sampler::new(
+            canvas,
+            &SamplerConfig {
+                name,
+                address_mode: AddressMode::Repeat,
+                mipmap_filter: MipmapFilterMode::Linear,
+                mip_level_count: 1,
+            },
+        );
+
+        BindSet::new(
+            canvas,
+            &BindSetConfig {
+                name,
+                content: (&texture_view, &sampler),
+            },
+        )
+    }
 }
 
 impl Registry<Tex> {
@@ -55,7 +100,7 @@ impl Registry<Tex> {
         &self,
         canvas: &Canvas,
         name: &'a str,
-    ) -> BindSet<TextureSampler> {
+    ) -> BindSet<TextureArraySampler> {
         let width = self.get(0).width;
         let height = self.get(0).height;
         let len = self.items.len() as u32;
@@ -67,7 +112,7 @@ impl Registry<Tex> {
             canvas,
             &TextureConfig {
                 name: mip_name,
-                texs: &self.items,
+                texs: self.items.iter().collect(),
                 width,
                 height,
                 mip_level_count,
@@ -79,7 +124,7 @@ impl Registry<Tex> {
             canvas,
             &TextureConfig {
                 name,
-                texs: &self.items,
+                texs: self.items.iter().collect(),
                 width,
                 height,
                 mip_level_count,
@@ -206,11 +251,36 @@ impl Registry<Tex> {
 
 pub struct TextureSampler;
 
+pub struct TextureArraySampler;
+
 struct MipSource;
 
 struct MipDestination;
 
 impl BindSignature for TextureSampler {
+    const NAME: &'static str = "texture";
+    const LAYOUTS: &'static [BindGroupLayoutEntry] = &[
+        BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Texture {
+                sample_type: TextureSampleType::Float { filterable: true },
+                view_dimension: TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        BindGroupLayoutEntry {
+            binding: 1,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Sampler(SamplerBindingType::Filtering),
+            count: None,
+        },
+    ];
+    type Content<'a> = (&'a TextureView, &'a Sampler);
+}
+
+impl BindSignature for TextureArraySampler {
     const NAME: &'static str = "texture_sampler";
     const LAYOUTS: &'static [BindGroupLayoutEntry] = &[
         BindGroupLayoutEntry {
@@ -284,7 +354,7 @@ pub struct SamplerConfig<'a> {
 
 pub struct TextureConfig<'a> {
     pub name: &'a str,
-    pub texs: &'a Vec<Tex>,
+    pub texs: Vec<&'a Tex>,
     pub width: u32,
     pub height: u32,
     pub mip_level_count: u32,
@@ -326,7 +396,7 @@ impl FromConfig<TextureConfig<'_>> for Texture {
     fn new(base: &Self::Base, config: &TextureConfig) -> Self {
         let device = &base.device;
         let queue = &base.queue;
-        let textures = config.texs;
+        let textures = &config.texs;
 
         let size = Extent3d {
             width: config.width,

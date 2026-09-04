@@ -1,5 +1,5 @@
 use crate::ecs::*;
-use crate::render::{AlphaVertex, Mesh, MeshGroup, NormTexVertex};
+use crate::render::{AlphaVertex, Mesh, MeshGroup, NormTexVertex, Tex};
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3, Direction, ICoord3};
 use crate::util::Id;
@@ -29,6 +29,30 @@ fn build_block_mesh_templates() -> Registry<BlockMeshTemplate> {
     templates.register(5, cube_s);
 
     templates
+}
+
+pub fn create_block_textures() -> Registry<Tex> {
+    let mut textures = Registry::new();
+
+    let missing = Tex::from_png("missing").expect("Failed to load Textures");
+    let bricks = Tex::from_png("bricks").unwrap_or(missing.clone());
+    let dirt = Tex::from_png("dirt").unwrap_or(missing.clone());
+    let grass_side = Tex::from_png("grass_side").unwrap_or(missing.clone());
+    let grass_top = Tex::from_png("grass_top").unwrap_or(missing.clone());
+    let log_side = Tex::from_png("log_side").unwrap_or(missing.clone());
+    let log_top = Tex::from_png("log_top").unwrap_or(missing.clone());
+    let leaves = Tex::from_png("leaves").unwrap_or(missing.clone());
+
+    textures.register(0, missing);
+    textures.register(1, bricks);
+    textures.register(2, dirt);
+    textures.register(3, grass_side);
+    textures.register(4, grass_top);
+    textures.register(5, log_side);
+    textures.register(6, log_top);
+    textures.register(7, leaves);
+
+    textures
 }
 
 #[derive(Default)]
@@ -67,7 +91,7 @@ impl BlockMeshTemplate {
                 Direction::North => (Direction::West, Direction::Down),
                 Direction::South => (Direction::East, Direction::Down),
             };
-            
+
             let (umin, umax) = match udir.positive() {
                 false => (1.0 - max.get(udir.axis()), 1.0 - min.get(udir.axis())),
                 true => (min.get(udir.axis()), max.get(udir.axis())),
@@ -76,7 +100,7 @@ impl BlockMeshTemplate {
                 false => (1.0 - max.get(vdir.axis()), 1.0 - min.get(vdir.axis())),
                 true => (min.get(vdir.axis()), max.get(vdir.axis())),
             };
-            
+
             vec![
                 Vec2::new(umin, vmin),
                 Vec2::new(umin, vmax),
@@ -125,7 +149,11 @@ impl BlockMeshTemplate {
                         },
                     };
 
-                    spans.push(MergeSpan { axis: maxis, ends, uv_unit });
+                    spans.push(MergeSpan {
+                        axis: maxis,
+                        ends,
+                        uv_unit,
+                    });
                 }
             }
 
@@ -163,21 +191,21 @@ impl BlockModel {
 }
 
 pub struct MeshingTask {
-    pub pos: RegionPos,
-    pub chunk_pos: Option<ChunkPos>,
+    pub lod: u8,
+    pub pos: Option<SubRegionPos>,
     pub chunk: Chunk,
+    pub tx: Sender<MeshingResult>,
 }
 
 pub struct MeshingResult {
-    pub pos: RegionPos,
-    pub chunk_pos: Option<ChunkPos>,
-    pub block_mesh: Mesh<NormTexVertex>,
-    pub occlusion_mesh: Mesh<AlphaVertex>,
+    pub lod: u8,
+    pub pos: Option<SubRegionPos>,
+    pub blocks: Mesh<NormTexVertex>,
+    pub occlusion: Mesh<AlphaVertex>,
 }
 
 pub struct ChunkMesher {
-    task_rs: Receiver<MeshingTask>,
-    result_tx: Sender<MeshingResult>,
+    task_rx: Receiver<MeshingTask>,
 }
 
 struct MeshMerger {
@@ -191,61 +219,75 @@ struct MeshMerger {
 impl Resource for ChunkMesher {}
 
 impl ChunkMesher {
-    pub fn new(task_rs: Receiver<MeshingTask>, result_tx: Sender<MeshingResult>) -> Self {
-        Self { task_rs, result_tx }
+    pub fn new(task_rx: Receiver<MeshingTask>) -> Self {
+        Self { task_rx }
     }
 
     pub fn update(&mut self, threads: &WorldThreads) {
-        let WorldThreads(near_thread, far_thread) = threads;
+        let WorldThreads(near_threads, far_threads) = threads;
 
-        while let Ok(task) = self.task_rs.try_recv() {
-            let result_tx = self.result_tx.clone();
-            let threads = match task.chunk_pos {
-                Some(_) => near_thread,
-                None => far_thread,
-            };
-
-            threads.spawn(move || {
-                let result = Self::perform(&task);
-
-                if result_tx.try_send(result).is_err() {
-                    error!(
-                        "Failed to send Chunk Meshing Result of Region at {} to Rendered World",
-                        task.pos
-                    );
-                }
-            });
+        let mut near_tasks = Vec::new();
+        let mut far_tasks = Vec::new();
+        for task in self.task_rx.try_iter() {
+            match task.pos {
+                None => far_tasks.push(task),
+                Some(_) => near_tasks.push(task),
+            }
         }
+
+        near_threads.spawn(move || {
+            near_tasks.into_par_iter().for_each(|task| {
+                Self::perform(task);
+            })
+        });
+
+        far_threads.spawn(move || {
+            far_tasks.into_par_iter().for_each(|task| {
+                Self::perform(task);
+            })
+        });
     }
 
-    fn perform(task: &MeshingTask) -> MeshingResult {
-        let (mut block_mesh, mut occlusion_mesh) = Self::build_meshes(&task.chunk);
+    fn perform(task: MeshingTask) {
+        let (mut blocks, mut occlusion) = Self::build_meshes(&task.chunk);
 
-        if task.chunk_pos.is_none() {
-            let scale = (REGION_SIZE / (task.chunk.side - 2)) as f32;
-            block_mesh.multiply(scale);
-            occlusion_mesh.multiply(scale);
+        match task.pos {
+            None => {
+                let scale = Region::block_size_on_lod(task.lod) as f32;
+                blocks.multiply(scale);
+                occlusion.multiply(scale);
+            }
+
+            Some(pos) => {
+                let offset = (pos * SUBREGION_SIZE).as_vec3();
+                blocks.translate(offset);
+                occlusion.translate(offset);
+            }
         }
 
-        MeshingResult {
+        let result = MeshingResult {
+            lod: task.lod,
             pos: task.pos,
-            chunk_pos: task.chunk_pos,
-            block_mesh,
-            occlusion_mesh,
+            blocks,
+            occlusion,
+        };
+
+        if task.tx.try_send(result).is_err() {
+            error!("Failed to send Meshes to Region");
         }
     }
 
     fn build_meshes(chunk: &Chunk) -> (Mesh<NormTexVertex>, Mesh<AlphaVertex>) {
         let mut temp_mergers = HashMap::new();
-        let n = chunk.side - 2;
-        
+        let [w, h, d] = (chunk.size - 2).to_array();
+
         let mut block_mesh = Mesh::new();
         let mut occlusion_mesh = Mesh::new();
 
-        for x in 0..n {
-            for y in 0..n {
-                for z in 0..n {
-                    let pos = RelBlockPos::new(x, y, z);
+        for x in 0..w {
+            for y in 0..h {
+                for z in 0..d {
+                    let pos = LocalPos::new(x, y, z);
                     let real_pos = pos + 1;
                     let block = Block::from_meta(*chunk.get(real_pos));
 
@@ -313,11 +355,16 @@ impl ChunkMesher {
                         }
 
                         if template.spans.is_empty() {
-                            block_mesh.merge(&template.mesh.with_texture(temp_mesh.texture).translated(pos.as_vec3()));
+                            block_mesh.merge(
+                                &template
+                                    .mesh
+                                    .with_texture(temp_mesh.texture)
+                                    .translated(pos.as_vec3()),
+                            );
                         } else {
                             temp_mergers
                                 .entry(*temp_mesh)
-                                .or_insert_with(|| MeshMerger::new(n, &template.spans))
+                                .or_insert_with(|| MeshMerger::new(w, &template.spans))
                                 .add(pos);
                         }
                     }
@@ -328,32 +375,32 @@ impl ChunkMesher {
         let merged = temp_mergers
             .into_par_iter()
             .map(|(temp_mesh, merger)| {
-                
                 let template = BLOCK_MESH_TEMPLATES.get(temp_mesh.template);
                 let base = template.mesh.with_texture(temp_mesh.texture);
-                
-                merger.map(|(pos, extent)| {
-                    let mut mesh = base.translated(pos.as_vec3());
-                    
-                    for (i, dist) in extent.into_iter().enumerate() {
-                        let span = &template.spans[i];
-                        
-                        for &end in span.ends.iter() {
-                            let vertex = &mut mesh.vertices[end];
-                            
-                            vertex.pos = vertex.pos.shift(span.axis, dist as f32);
-                            vertex.uv += span.uv_unit * dist as f32;
+
+                merger
+                    .map(|(pos, extent)| {
+                        let mut mesh = base.translated(pos.as_vec3());
+
+                        for (i, dist) in extent.into_iter().enumerate() {
+                            let span = &template.spans[i];
+
+                            for &end in span.ends.iter() {
+                                let vertex = &mut mesh.vertices[end];
+
+                                vertex.pos = vertex.pos.shift(span.axis, dist as f32);
+                                vertex.uv += span.uv_unit * dist as f32;
+                            }
                         }
-                    }
-                    
-                    mesh
-                })
+
+                        mesh
+                    })
                     .collect::<Vec<_>>()
                     .merge()
             })
             .collect::<Vec<_>>()
             .merge();
-        
+
         block_mesh.merge(&merged);
 
         (block_mesh, occlusion_mesh)
@@ -362,12 +409,12 @@ impl ChunkMesher {
 
 impl Iterator for MeshMerger {
     type Item = (U8Vec3, SmallVec<[u8; 2]>);
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         let n = self.side as usize;
-        
+
         let (idx, bit) = &mut self.current;
-        
+
         while *idx < n * n {
             *bit += (self.lines[*idx] >> (*bit)).trailing_zeros() as u8;
             if *bit >= self.side {
@@ -377,21 +424,21 @@ impl Iterator for MeshMerger {
                 break;
             }
         }
-        
+
         let (idx, bit) = self.current;
-        
+
         if idx < n * n {
             let pos = self.pos_of_bit(self.current);
             let mut extent = SmallVec::new();
-            
+
             let dist = (self.lines[idx] >> bit).trailing_ones() as u8 - 1;
             let removal = !(((1u64 << (dist + 1)) - 1) << bit);
             extent.push(dist);
             self.lines[idx] &= removal;
-            
+
             if self.two {
                 let mut dist1 = 0;
-                
+
                 for idx1 in idx + 1..((idx / n) + 1) * n {
                     if (self.lines[idx1] >> bit).trailing_ones() as u8 > dist {
                         dist1 += 1;
@@ -400,10 +447,10 @@ impl Iterator for MeshMerger {
                         break;
                     }
                 }
-                
+
                 extent.push(dist1);
             }
-            
+
             Some((pos, extent))
         } else {
             None
@@ -419,7 +466,7 @@ impl MeshMerger {
         for i in 0..span_count {
             axes.swap(i, spans[i].axis.idx());
         }
-        
+
         Self {
             lines: masks,
             side,
@@ -428,27 +475,27 @@ impl MeshMerger {
             current: (0, 0),
         }
     }
-    
+
     #[inline]
     fn pos_of_bit(&self, bit: (usize, u8)) -> U8Vec3 {
         let (idx, bit) = bit;
         let n = self.side as usize;
-        
+
         U8Vec3::ZERO
             .with(self.axes[0], bit)
             .with(self.axes[1], (idx % n) as u8)
             .with(self.axes[2], (idx / n) as u8)
     }
-    
+
     #[inline]
     fn bit_of_pos(&self, pos: U8Vec3) -> (usize, u8) {
         assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
-        
+
         let n = self.side as usize;
         let idx = pos.get(self.axes[1]) as usize + pos.get(self.axes[2]) as usize * n;
         (idx, pos.get(self.axes[0]))
     }
-    
+
     fn add(&mut self, pos: U8Vec3) {
         let (idx, bit) = self.bit_of_pos(pos);
         self.lines[idx] |= 1u64 << bit;

@@ -1,4 +1,5 @@
 use crate::ecs::*;
+use crate::render::{FromConfig, TextureViewConfig};
 use glam::{f32, u32};
 use wgpu::CurrentSurfaceTexture::Success;
 use wgpu::*;
@@ -38,19 +39,21 @@ impl Canvas {
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
-        
+
         let surface = wgpu_instance.create_surface(window).unwrap();
         let adapter = wgpu_instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::default(),
                 force_fallback_adapter: false,
                 compatible_surface: Some(&surface),
+                apply_limit_buckets: false,
             })
             .await
             .expect("Failed to find adapter");
         let surface_config = SurfaceConfiguration {
-            usage: TextureUsages::RENDER_ATTACHMENT,
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             format: TextureFormat::Rgba8UnormSrgb,
+            color_space: SurfaceColorSpace::default(),
             width,
             height,
             present_mode: PresentMode::AutoNoVsync,
@@ -119,10 +122,22 @@ impl Canvas {
 
     pub fn begin(&self) -> Frame {
         if let Success(surface_texture) = self.surface.get_current_texture() {
-            let color = surface_texture
-                .texture
-                .create_view(&TextureViewDescriptor::default());
-            let depth = self.depth.create_view(&TextureViewDescriptor::default());
+            let color = TextureView::new(
+                &surface_texture.texture,
+                &TextureViewConfig {
+                    name: "color",
+                    dimension: TextureViewDimension::D2,
+                    mip_level: None,
+                },
+            );
+            let depth = TextureView::new(
+                &self.depth,
+                &TextureViewConfig {
+                    name: "depth",
+                    dimension: TextureViewDimension::D2,
+                    mip_level: None,
+                },
+            );
             let encoder = self
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor {
@@ -142,7 +157,7 @@ impl Canvas {
 
     pub fn end(&self, frame: Frame) {
         self.queue.submit(Some(frame.encoder.finish()));
-        frame.surface_texture.present();
+        self.queue.present(frame.surface_texture);
     }
 }
 
@@ -213,7 +228,11 @@ impl System for RenderFinisher {
         _: <Self::CompQuery as CompQuery>::Item<'a>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
-        res.0.end(res.1.take().expect("Failed to finish rendering. Make sure to use Canvas::begin first!"));
+        res.0.end(
+            res.1
+                .take()
+                .expect("Failed to finish rendering. Make sure to use Canvas::begin first!"),
+        );
 
         None
     }

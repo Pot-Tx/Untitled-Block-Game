@@ -35,7 +35,7 @@ pub trait System: 'static + Sync + Send {
 
 trait SystemBridge: 'static + Sync + Send {
     fn access(&self) -> Access;
-    
+
     fn update(
         &mut self,
         components: &ComponentManager,
@@ -60,16 +60,16 @@ impl SystemManager {
 
         self.stages[order].push(Box::new(system));
     }
-    
+
     pub fn init(&mut self) {
         let mut stages = Vec::new();
-        
+
         for stage in self.stages.iter_mut() {
             while !stage.is_empty() {
                 let mut stage1 = Vec::new();
                 let mut access = Access::new();
                 let mut remaining = Vec::new();
-                
+
                 for system in stage.drain(..) {
                     if access.add(&system.access()) {
                         stage1.push(system);
@@ -77,12 +77,12 @@ impl SystemManager {
                         remaining.push(system);
                     }
                 }
-                
+
                 *stage = remaining;
                 stages.push(stage1);
             }
         }
-        
+
         self.stages = stages;
     }
 
@@ -119,7 +119,7 @@ impl<S: System> SystemBridge for S {
         }
         access
     }
-    
+
     fn update(
         &mut self,
         components: &ComponentManager,

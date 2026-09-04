@@ -5,7 +5,7 @@ use crate::ecs::*;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3};
-use crate::world::{BlockPos, TestGen, World};
+use crate::world::{BlockPos, World};
 pub use control::*;
 use glam::{Vec2, Vec3};
 use std::f32::consts::FRAC_PI_2;
@@ -19,24 +19,27 @@ fn build_actor_types() -> Registry<ActorType> {
     let spectator = ActorType {
         descriptor: || {
             EntityDescriptor::new()
-                .with(Position(Vec3::splat(32.0)))
+                .with(Position(Vec3::splat(16.0)))
                 .with(Rotation(Vec3::ZERO))
                 .with(Velocity(Vec3::ZERO))
-                .with(Speed(0.5))
+                .with(Speed(0.25))
                 .with(PlayerControlled)
         },
     };
     let survivor = ActorType {
         descriptor: || {
             EntityDescriptor::new()
-                .with(Position(Vec3::splat(32.0)))
+                .with(Position(Vec3::splat(16.0)))
                 .with(Rotation(Vec3::ZERO))
                 .with(Velocity(Vec3::ZERO))
-                .with(Speed(0.5))
+                .with(Speed(0.25))
                 .with(PlayerControlled)
-                .with(Bound(AABB { min: Vec3::new(-0.25, -1.25, -0.25), max: Vec3::new(0.25, 0.25, 0.25) }))
+                .with(Bound(AABB {
+                    min: Vec3::new(-0.25, -1.25, -0.25),
+                    max: Vec3::new(0.25, 0.25, 0.25),
+                }))
                 .with(Option::<Selection>::None)
-        }
+        },
     };
 
     actor_types.register(0, spectator);
@@ -78,9 +81,14 @@ impl Rotation {
         self.0[1] += rot.y;
         self.0[1] = self.0[1].clamp(-FRAC_PI_2, FRAC_PI_2);
     }
-    
+
     pub fn direction(&self) -> Vec3 {
-        let (cy, sy, cp, sp) = (self.0[0].cos(), self.0[0].sin(), self.0[1].cos(), self.0[1].sin());
+        let (cy, sy, cp, sp) = (
+            self.0[0].cos(),
+            self.0[0].sin(),
+            self.0[1].cos(),
+            self.0[1].sin(),
+        );
         Vec3::new(sy * cp, sp, -cy * cp).normalize()
     }
 }
@@ -116,22 +124,22 @@ pub struct Friction;
 impl System for Translator {
     type CompQuery = (CompWrite<Position>, CompRead<Velocity>, Without<Bound>);
     type ResQuery = ();
-    
+
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         _: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         entry.1.translate(entry.2);
-        
+
         None
     }
 }
 
 impl System for Collider {
     type CompQuery = (CompWrite<Position>, CompWrite<Velocity>, CompRead<Bound>);
-    type ResQuery = ResRead<World<TestGen>>;
-    
+    type ResQuery = ResRead<World>;
+
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
@@ -141,60 +149,71 @@ impl System for Collider {
             let vel = entry.2.0.get(axis);
             entry.1.0 = entry.1.0.shift(axis, vel);
             let bound = entry.3.translate(entry.1);
-            
+
             let [(minx, maxx), (miny, maxy), (minz, maxz)] = Axis::ALL.map(|a| {
                 if a == axis {
                     if vel < 0.0 {
-                        (bound.min.get(a).floor() as i32, bound.min.get(a).ceil() as i32)
+                        (
+                            bound.min.get(a).floor() as i32,
+                            bound.min.get(a).ceil() as i32,
+                        )
                     } else {
-                        (bound.max.get(a).floor() as i32, bound.max.get(a).ceil() as i32)
+                        (
+                            bound.max.get(a).floor() as i32,
+                            bound.max.get(a).ceil() as i32,
+                        )
                     }
                 } else {
-                    (bound.min.get(a).floor() as i32, bound.max.get(a).ceil() as i32)
+                    (
+                        bound.min.get(a).floor() as i32,
+                        bound.max.get(a).ceil() as i32,
+                    )
                 }
             });
-            
+
             let mut depth = 0.0;
-            
+
             for x in minx..maxx {
                 for y in miny..maxy {
                     for z in minz..maxz {
                         let pos = BlockPos::new(x, y, z);
                         let block = res.get_block(pos);
                         let block_bounds = block.bounds(pos);
-                        
-                        let d = block_bounds.into_iter().map(|b| {
-                            if bound.intersects_with(b) {
-                                if vel < 0.0 {
-                                    b.max.get(axis) - bound.min.get(axis)
+
+                        let d = block_bounds
+                            .into_iter()
+                            .map(|b| {
+                                if bound.intersects_with(b) {
+                                    if vel < 0.0 {
+                                        b.max.get(axis) - bound.min.get(axis)
+                                    } else {
+                                        bound.max.get(axis) - b.min.get(axis)
+                                    }
                                 } else {
-                                    bound.max.get(axis) - b.min.get(axis)
+                                    0.0
                                 }
-                            } else {
-                                0.0
-                            }
-                        })
+                            })
                             .reduce(f32::max)
                             .unwrap_or(0.0)
                             .max(0.0);
-                        
+
                         if d > depth {
                             depth = d;
                         }
                     }
                 }
             }
-            
+
             if depth > 0.0 {
                 if vel > 0.0 {
                     depth = -depth;
                 }
-                
+
                 entry.1.0 = entry.1.0.shift(axis, depth);
                 entry.2.0 = entry.2.0.with(axis, 0.0);
             }
         }
-        
+
         None
     }
 }
@@ -202,14 +221,14 @@ impl System for Collider {
 impl System for Friction {
     type CompQuery = CompWrite<Velocity>;
     type ResQuery = ();
-    
+
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         _: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         entry.1.0 *= 0.5;
-        
+
         None
     }
 }

@@ -129,7 +129,7 @@ impl ErasedVec {
         unsafe {
             len.write(0);
         }
-        
+
         Self {
             data: UnsafeCell::new(Vec::new()),
             layout: Layout::new::<T>(),
@@ -143,12 +143,10 @@ impl ErasedVec {
             },
         }
     }
-    
+
     #[inline]
     const fn len(&self) -> usize {
-        unsafe {
-            *self.len
-        }
+        unsafe { *self.len }
     }
 
     #[inline]
@@ -283,7 +281,9 @@ impl ErasedVec {
             }
         }
         self.set_len(0);
-        unsafe { (&mut *self.data.get()).clear(); }
+        unsafe {
+            (&mut *self.data.get()).clear();
+        }
     }
 
     pub fn fmt<T: Debug>(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -326,7 +326,7 @@ impl ErasedDenseMap {
             None => None,
         }
     }
-    
+
     pub fn iter<T>(&self) -> ErasedDenseMapIter<'_, T> {
         ErasedDenseMapIter {
             id_iter: self.ids.iter(),
@@ -334,7 +334,7 @@ impl ErasedDenseMap {
             _marker: PhantomData,
         }
     }
-    
+
     pub fn iter_mut<T>(&self) -> ErasedDenseMapIterMut<'_, T> {
         ErasedDenseMapIterMut {
             id_iter: self.ids.iter(),
@@ -426,7 +426,7 @@ impl ErasedHashMap {
             None => None,
         }
     }
-    
+
     pub fn iter<T>(&self) -> ErasedHashMapIter<'_, T> {
         ErasedHashMapIter {
             id_iter: self.ids.iter(),
@@ -434,7 +434,7 @@ impl ErasedHashMap {
             _marker: PhantomData,
         }
     }
-    
+
     pub fn iter_mut<T>(&self) -> ErasedHashMapIterMut<'_, T> {
         ErasedHashMapIterMut {
             id_iter: self.ids.iter(),

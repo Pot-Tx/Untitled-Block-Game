@@ -20,6 +20,8 @@ pub trait Trans4: Trans {
         fov: Self::Scalar,
         aspect: Self::Scalar,
     ) -> Self;
+
+    fn viewport(width: Self::Scalar, height: Self::Scalar, aspect: Self::Scalar) -> Self;
 }
 
 macro_rules! impl_trans_for {
@@ -100,6 +102,20 @@ macro_rules! impl_trans4_for {
 	                    0.0, 0.0, near * far / range, 0.0,
                     ])
                 }
+
+	            fn viewport(width: Self::Scalar, height: Self::Scalar, aspect: Self::Scalar) -> Self {
+                    let (scale_x, scale_y) = if width / height < aspect {
+	                    (height * aspect, height)
+                    } else {
+                        (width, width / aspect)
+                    };
+		            Self::from_cols_array(&[
+			            1.0 / scale_x, 0.0, 0.0, 0.0,
+			            0.0, 1.0 / scale_y, 0.0, 0.0,
+			            0.0, 0.0, 1.0, 0.0,
+			            0.0, 0.0, 0.0, 1.0,
+		            ])
+	            }
             }
         )*
     };

@@ -1,13 +1,12 @@
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
-use crate::world::meshing::BlockModel;
+use crate::world::model::BlockModel;
 use crate::world::{BlockPos, TemplatedMesh};
 use glam::Vec3;
 use std::fmt;
 use std::fmt::Debug;
 use std::sync::LazyLock;
-
 pub static BLOCK_TYPES: LazyLock<Registry<BlockType>> = LazyLock::new(|| build_block_types());
 
 fn build_block_types() -> Registry<BlockType> {
@@ -49,7 +48,158 @@ fn build_block_types() -> Registry<BlockType> {
                 texture: 1,
             },
         ])],
-        bounds: vec![vec![AABB { min: Vec3::ZERO, max: Vec3::ONE }]],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
+        model_idx_of_state: |_| -> usize { 0 },
+        bounds_idx_of_state: |_| -> usize { 0 },
+        opacity: Vec3::ONE,
+        default_state: 0,
+    };
+
+    let dirt = BlockType {
+        models: vec![BlockModel::new(vec![
+            TemplatedMesh {
+                template: 0,
+                texture: 2,
+            },
+            TemplatedMesh {
+                template: 1,
+                texture: 2,
+            },
+            TemplatedMesh {
+                template: 2,
+                texture: 2,
+            },
+            TemplatedMesh {
+                template: 3,
+                texture: 2,
+            },
+            TemplatedMesh {
+                template: 4,
+                texture: 2,
+            },
+            TemplatedMesh {
+                template: 5,
+                texture: 2,
+            },
+        ])],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
+        model_idx_of_state: |_| -> usize { 0 },
+        bounds_idx_of_state: |_| -> usize { 0 },
+        opacity: Vec3::ONE,
+        default_state: 0,
+    };
+
+    let grass = BlockType {
+        models: vec![BlockModel::new(vec![
+            TemplatedMesh {
+                template: 0,
+                texture: 4,
+            },
+            TemplatedMesh {
+                template: 1,
+                texture: 4,
+            },
+            TemplatedMesh {
+                template: 2,
+                texture: 2,
+            },
+            TemplatedMesh {
+                template: 3,
+                texture: 4,
+            },
+            TemplatedMesh {
+                template: 4,
+                texture: 4,
+            },
+            TemplatedMesh {
+                template: 5,
+                texture: 4,
+            },
+        ])],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
+        model_idx_of_state: |_| -> usize { 0 },
+        bounds_idx_of_state: |_| -> usize { 0 },
+        opacity: Vec3::ONE,
+        default_state: 0,
+    };
+
+    let log = BlockType {
+        models: vec![BlockModel::new(vec![
+            TemplatedMesh {
+                template: 0,
+                texture: 5,
+            },
+            TemplatedMesh {
+                template: 1,
+                texture: 5,
+            },
+            TemplatedMesh {
+                template: 2,
+                texture: 6,
+            },
+            TemplatedMesh {
+                template: 3,
+                texture: 6,
+            },
+            TemplatedMesh {
+                template: 4,
+                texture: 5,
+            },
+            TemplatedMesh {
+                template: 5,
+                texture: 5,
+            },
+        ])],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
+        model_idx_of_state: |_| -> usize { 0 },
+        bounds_idx_of_state: |_| -> usize { 0 },
+        opacity: Vec3::ONE,
+        default_state: 0,
+    };
+
+    let leaves = BlockType {
+        models: vec![BlockModel::new(vec![
+            TemplatedMesh {
+                template: 0,
+                texture: 7,
+            },
+            TemplatedMesh {
+                template: 1,
+                texture: 7,
+            },
+            TemplatedMesh {
+                template: 2,
+                texture: 7,
+            },
+            TemplatedMesh {
+                template: 3,
+                texture: 7,
+            },
+            TemplatedMesh {
+                template: 4,
+                texture: 7,
+            },
+            TemplatedMesh {
+                template: 5,
+                texture: 7,
+            },
+        ])],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
         model_idx_of_state: |_| -> usize { 0 },
         bounds_idx_of_state: |_| -> usize { 0 },
         opacity: Vec3::ONE,
@@ -58,6 +208,10 @@ fn build_block_types() -> Registry<BlockType> {
 
     block_types.register(0, air);
     block_types.register(1, bricks);
+    block_types.register(2, dirt);
+    block_types.register(3, grass);
+    block_types.register(4, log);
+    block_types.register(5, leaves);
 
     block_types
 }
@@ -111,11 +265,11 @@ impl Block {
     pub fn air() -> Self {
         Self::default_of(0)
     }
-    
+
     #[inline]
     pub fn default_of(type_id: Id) -> Self {
         let block_type = BLOCK_TYPES.get(type_id);
-        
+
         Self {
             type_id,
             block_type,
@@ -161,7 +315,7 @@ impl Block {
         let block_type = self.block_type;
         &block_type.models[(block_type.model_idx_of_state)(self.state)]
     }
-    
+
     #[inline]
     pub fn bounds(&self, pos: BlockPos) -> Vec<AABB<Vec3>> {
         let block_type = self.block_type;

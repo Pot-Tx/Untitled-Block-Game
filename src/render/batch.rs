@@ -144,9 +144,13 @@ impl<S: BatchSignature, V: Vertex, I: Inst> RenderBatch<S, V, I> {
         let items = item.rendered();
 
         for item in items {
-            pass.set_vertex_buffer(0, item.geometry.vertex_buffer.slice(..));
+            if let Some(buffer) = &item.geometry.vertex_buffer {
+                pass.set_vertex_buffer(0, buffer.slice(..));
+            }
             pass.set_index_buffer(item.geometry.index_buffer.slice(..), IndexFormat::Uint16);
-            pass.set_vertex_buffer(1, item.instances.instance_buffer.slice(..));
+            if let Some(buffer) = &item.instances.instance_buffer {
+                pass.set_vertex_buffer(1, buffer.slice(..));
+            }
 
             pass.draw_indexed(
                 0..item.geometry.index_count,

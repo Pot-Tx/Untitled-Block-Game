@@ -1,14 +1,12 @@
-use crate::util::coord::*;
+use crate::util::coord::Coord;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use std::fmt::Debug;
-use std::marker::PhantomData;
 use wgpu::*;
-
 pub trait Vertex: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
     type Pos: Coord;
     const ATTRIBUTE_COUNT: u32;
-    const LAYOUT: VertexBufferLayout<'static>;
+    const LAYOUT: Option<VertexBufferLayout<'static>>;
 
     #[must_use]
     fn translate(self, dpos: Self::Pos) -> Self;
@@ -21,16 +19,14 @@ pub trait Vertex: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
 }
 
 pub trait Inst: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
-    fn layout<'a, V: Vertex>() -> VertexBufferLayout<'a>;
+    const EMPTY: bool;
+
+    fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>>;
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug)]
-pub struct NoVertex<C: Coord>(PhantomData<C>);
-
-unsafe impl<C: Coord> Pod for NoVertex<C> {}
-
-unsafe impl<C: Coord> Zeroable for NoVertex<C> {}
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct NoVertex;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -104,25 +100,21 @@ macro_rules! vertex_basics {
     };
 }
 
-impl<C: Coord> Vertex for NoVertex<C> {
-    type Pos = C;
+impl Vertex for () {
+    type Pos = Vec3;
     const ATTRIBUTE_COUNT: u32 = 0;
-    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
-        array_stride: 0,
-        step_mode: VertexStepMode::Vertex,
-        attributes: &[],
-    };
-    
+    const LAYOUT: Option<VertexBufferLayout<'static>> = None;
+
     #[inline]
     fn translate(self, _: Self::Pos) -> Self {
         self
     }
-    
+
     #[inline]
     fn scale(self, _: Self::Pos) -> Self {
         self
     }
-    
+
     #[inline]
     fn multiply(self, _: <Self::Pos as Coord>::Scalar) -> Self {
         self
@@ -132,7 +124,7 @@ impl<C: Coord> Vertex for NoVertex<C> {
 impl Vertex for BasicVertex {
     vertex_basics!(Vec3, 1);
 
-    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
+    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
         array_stride: size_of::<Self>() as BufferAddress,
         step_mode: VertexStepMode::Vertex,
         attributes: &[VertexAttribute {
@@ -140,7 +132,7 @@ impl Vertex for BasicVertex {
             shader_location: 0,
             format: VertexFormat::Float32x3,
         }],
-    };
+    });
 
     #[inline]
     fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
@@ -169,7 +161,7 @@ impl BasicVertex {
 impl Vertex for NormVertex {
     vertex_basics!(Vec3, 2);
 
-    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
+    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
         array_stride: size_of::<Self>() as BufferAddress,
         step_mode: VertexStepMode::Vertex,
         attributes: &[
@@ -184,7 +176,7 @@ impl Vertex for NormVertex {
                 format: VertexFormat::Float32x3,
             },
         ],
-    };
+    });
 
     #[inline]
     fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
@@ -214,7 +206,7 @@ impl NormVertex {
 impl Vertex for TexVertex {
     vertex_basics!(Vec3, 3);
 
-    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
+    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
         array_stride: size_of::<Self>() as BufferAddress,
         step_mode: VertexStepMode::Vertex,
         attributes: &[
@@ -234,7 +226,7 @@ impl Vertex for TexVertex {
                 format: VertexFormat::Float32x2,
             },
         ],
-    };
+    });
 
     #[inline]
     fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
@@ -266,7 +258,7 @@ impl TexVertex {
 impl Vertex for NormTexVertex {
     vertex_basics!(Vec3, 4);
 
-    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
+    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
         array_stride: size_of::<Self>() as BufferAddress,
         step_mode: VertexStepMode::Vertex,
         attributes: &[
@@ -291,7 +283,7 @@ impl Vertex for NormTexVertex {
                 format: VertexFormat::Float32x3,
             },
         ],
-    };
+    });
 
     #[inline]
     fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
@@ -315,7 +307,7 @@ impl NormTexVertex {
 impl Vertex for AlphaVertex {
     vertex_basics!(Vec3, 2);
 
-    const LAYOUT: VertexBufferLayout<'static> = VertexBufferLayout {
+    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
         array_stride: size_of::<Self>() as BufferAddress,
         step_mode: VertexStepMode::Vertex,
         attributes: &[
@@ -330,7 +322,7 @@ impl Vertex for AlphaVertex {
                 format: VertexFormat::Float32,
             },
         ],
-    };
+    });
 
     #[inline]
     fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
@@ -339,19 +331,19 @@ impl Vertex for AlphaVertex {
     }
 }
 
-impl Inst for NoInst {
-    fn layout<'a, V: Vertex>() -> VertexBufferLayout<'a> {
-        VertexBufferLayout {
-            array_stride: 0,
-            step_mode: VertexStepMode::Instance,
-            attributes: &[],
-        }
+impl Inst for () {
+    const EMPTY: bool = true;
+
+    fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
+        None
     }
 }
 
 impl Inst for TransInst {
-    fn layout<'a, V: Vertex>() -> VertexBufferLayout<'a> {
-        VertexBufferLayout {
+    const EMPTY: bool = false;
+
+    fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
+        Some(VertexBufferLayout {
             array_stride: size_of::<Self>() as BufferAddress,
             step_mode: VertexStepMode::Instance,
             attributes: &[VertexAttribute {
@@ -359,13 +351,15 @@ impl Inst for TransInst {
                 shader_location: V::ATTRIBUTE_COUNT,
                 format: VertexFormat::Float32x3,
             }],
-        }
+        })
     }
 }
 
 impl Inst for IntTransInst {
-    fn layout<'a, V: Vertex>() -> VertexBufferLayout<'a> {
-        VertexBufferLayout {
+    const EMPTY: bool = false;
+
+    fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
+        Some(VertexBufferLayout {
             array_stride: size_of::<Self>() as BufferAddress,
             step_mode: VertexStepMode::Instance,
             attributes: &[VertexAttribute {
@@ -373,6 +367,6 @@ impl Inst for IntTransInst {
                 shader_location: V::ATTRIBUTE_COUNT,
                 format: VertexFormat::Sint32x3,
             }],
-        }
+        })
     }
 }

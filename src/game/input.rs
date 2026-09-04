@@ -16,7 +16,7 @@ pub static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 256.0);
 
 fn build_input_map() -> Registry<Input> {
     let mut input_map = Registry::new();
-    
+
     let escape = Input {
         button: InputButton::Key(KeyCode::Escape),
         input_type: InputType::JustPressed,
@@ -53,7 +53,7 @@ fn build_input_map() -> Registry<Input> {
         button: InputButton::Mouse(MouseButton::Right),
         input_type: InputType::JustPressed,
     };
-    
+
     input_map.register(0, escape);
     input_map.register(1, forward);
     input_map.register(2, left);
@@ -211,7 +211,7 @@ pub struct InputFlusher;
 impl System for Escaper {
     type CompQuery = ();
     type ResQuery = ResWrite<InputState>;
-    
+
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
@@ -222,18 +222,21 @@ impl System for Escaper {
             if res.cursor_grabbed {
                 let width = WINDOW.inner_size().width;
                 let height = WINDOW.inner_size().height;
-                WINDOW.set_cursor_position(PhysicalPosition::new(width / 2, height / 2))
+                WINDOW
+                    .set_cursor_position(PhysicalPosition::new(width / 2, height / 2))
                     .expect("Failed to center cursor");
-                WINDOW.set_cursor_grab(CursorGrabMode::Locked)
+                WINDOW
+                    .set_cursor_grab(CursorGrabMode::Locked)
                     .expect("Failed to grab cursor");
                 WINDOW.set_cursor_visible(false);
             } else {
-                WINDOW.set_cursor_grab(CursorGrabMode::None)
+                WINDOW
+                    .set_cursor_grab(CursorGrabMode::None)
                     .expect("Failed to grab cursor");
                 WINDOW.set_cursor_visible(true);
             }
         }
-        
+
         None
     }
 }
@@ -241,14 +244,14 @@ impl System for Escaper {
 impl System for InputFlusher {
     type CompQuery = ();
     type ResQuery = ResWrite<InputState>;
-    
+
     fn operate<'a>(
         &mut self,
         _: <Self::CompQuery as CompQuery>::Item<'a>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
     ) -> Option<Vec<Command>> {
         res.clear();
-        
+
         None
     }
 }

@@ -8,8 +8,10 @@ use crate::util::coord::{Direction, ICoord3};
 use crate::util::OnceInit;
 use crate::world::*;
 use crossbeam_channel::unbounded;
+use glam::Vec3Swizzles;
 use noise_functions::{CellDistanceSq, Noise, Perlin};
 use rayon::ThreadPoolBuilder;
+use smallvec::smallvec;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -128,6 +130,7 @@ impl GameClient {
         let mut simulation = Simulation::new();
 
         simulation.components.register::<Position>();
+        simulation.components.register::<PrevPos>();
         simulation.components.register::<Rotation>();
         simulation.components.register::<Velocity>();
         simulation.components.register::<Speed>();
@@ -136,12 +139,13 @@ impl GameClient {
         simulation.components.register::<Option<Selection>>();
 
         simulation.systems.register(0, PlayerController);
-        simulation.systems.register(1, Translator);
-        simulation.systems.register(2, Collider);
-        simulation.systems.register(3, Friction);
-        simulation.systems.register(4, Selector);
-        simulation.systems.register(5, WorldUpdater);
-        simulation.systems.register(6, ChunkMeshing);
+        simulation.systems.register(1, Stalker);
+        simulation.systems.register(2, Translator);
+        simulation.systems.register(3, Collider);
+        simulation.systems.register(4, Friction);
+        simulation.systems.register(5, Selector);
+        simulation.systems.register(6, WorldUpdater);
+        simulation.systems.register(7, ChunkMeshing);
 
         simulation.resources.register(InputState::new());
         let near_threads = ThreadPoolBuilder::new()
@@ -157,10 +161,15 @@ impl GameClient {
         simulation
             .resources
             .register(WorldThreads(near_threads, far_threads));
-        simulation
-            .resources
-            .register(World::new(vec![4, 8, 12, 16, 20, 24], gen_tx, meshing_tx));
+        simulation.resources.register(World::new(
+            RegionPos::ZERO,
+            smallvec![1, 3, 5, 7],
+            gen_tx,
+            meshing_tx,
+        ));
         simulation.resources.register(Generator::new(
+            RegionPos::ZERO,
+            8,
             Field {
                 temperature: |_| -> f32 { 0.0 },
                 ventilation: |pos| -> f32 {
@@ -185,16 +194,27 @@ impl GameClient {
                 density: |pos| -> f32 {
                     let pos = pos.as_vec3();
 
-                    let d1 = Perlin::default().frequency(0.03125).sample3(pos);
+                    let h = Perlin::default().frequency(0.015625).sample2(pos.xz()) * 32.0;
+                    let a = 0.125;
+                    let b = 0.0625;
+                    let d1 = (if h > 0.0 {
+                        ((h * a).exp() - 1.0) / a
+                    } else {
+                        (1.0 - (h * -b).exp()) / b
+                    } - pos.y)
+                        * 0.03125;
 
-                    let d2 = -pos.y * 0.015625;
+                    let d2 = Perlin::default().frequency(0.0625).sample3(pos) * 0.75;
 
-                    (d1 + d2).tanh()
+                    (d1.tanh() + d2).tanh()
                 },
             },
             |sample| -> Meta {
                 if sample.density > 0.0 && sample.ventilation < 0.0 {
-                    if sample.density < 0.125 && sample.gradient.y < 0.0 {
+                    if sample.density < 0.125
+                        && sample.gradient.y < 0.0
+                        && sample.gradient.xy().length_squared() < 0.00390625
+                    {
                         2
                     } else {
                         1

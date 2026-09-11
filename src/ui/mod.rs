@@ -1,15 +1,15 @@
 use crate::ecs::{Command, CompQuery, ResQuery, ResRead, ResWrite, System};
 use crate::render::{
-	BindSet, Canvas, Frame, FromConfig, Geometry, Inst, InstGroup, Instances, Mesh, Render,
-	RenderBatch, RenderBatchConfig, RenderDescriptor, RenderItem, Tex, TextureSampler, Transformation,
-	Vertex, ViewPort, QUAD_INDICES,
+    BindSet, Canvas, Frame, FromConfig, Geometry, Inst, InstGroup, Instances, Mesh, Render,
+    RenderBatch, RenderBatchConfig, RenderDescriptor, RenderItem, Tex, TextureSampler, Transformation,
+    Vertex, ViewPort, QUAD_INDICES,
 };
 use crate::util::OnceInit;
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
 use wgpu::{
-	BufferAddress, LoadOp, PrimitiveTopology, VertexAttribute, VertexBufferLayout, VertexFormat,
-	VertexStepMode,
+    BufferAddress, LoadOp, PrimitiveTopology, VertexAttribute, VertexBufferLayout, VertexFormat,
+    VertexStepMode,
 };
 
 pub static SPRITE_GEOMETRY: OnceInit<Geometry<()>> = OnceInit::new();

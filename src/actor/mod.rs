@@ -20,6 +20,7 @@ fn build_actor_types() -> Registry<ActorType> {
         descriptor: || {
             EntityDescriptor::new()
                 .with(Position(Vec3::splat(16.0)))
+                .with(PrevPos(Vec3::splat(16.0)))
                 .with(Rotation(Vec3::ZERO))
                 .with(Velocity(Vec3::ZERO))
                 .with(Speed(0.25))
@@ -30,6 +31,7 @@ fn build_actor_types() -> Registry<ActorType> {
         descriptor: || {
             EntityDescriptor::new()
                 .with(Position(Vec3::splat(16.0)))
+                .with(PrevPos(Vec3::splat(16.0)))
                 .with(Rotation(Vec3::ZERO))
                 .with(Velocity(Vec3::ZERO))
                 .with(Speed(0.25))
@@ -65,6 +67,8 @@ components! {
     pub struct Omega(Vec3): Hot;
     pub struct Speed(f32): Hot;
     pub struct Bound(AABB<Vec3>): Hot;
+
+    pub struct PrevPos(Vec3): Cold;
 }
 
 impl Position {
@@ -115,11 +119,28 @@ impl Bound {
     }
 }
 
+pub struct Stalker;
+
 pub struct Translator;
 
 pub struct Collider;
 
 pub struct Friction;
+
+impl System for Stalker {
+    type CompQuery = (CompRead<Position>, CompWrite<PrevPos>);
+    type ResQuery = ();
+
+    fn operate(
+        &mut self,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        _: &mut <Self::ResQuery as ResQuery>::Item<'_>,
+    ) -> Option<Vec<Command>> {
+        entry.2.0 = entry.1.0;
+
+        None
+    }
+}
 
 impl System for Translator {
     type CompQuery = (CompWrite<Position>, CompRead<Velocity>, Without<Bound>);

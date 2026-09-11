@@ -1,5 +1,5 @@
 use crate::ecs::*;
-use crate::render::{AlphaVertex, Mesh, MeshGroup, NormTexVertex, Tex};
+use crate::render::{AlphaVertex, BindSet, Mesh, MeshGroup, NormTexVertex, Tex};
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3, Direction, ICoord3};
 use crate::util::Id;
@@ -53,6 +53,10 @@ pub fn create_block_textures() -> Registry<Tex> {
     textures.register(7, leaves);
 
     textures
+}
+
+resources! {
+    pub struct BlockTextures(BindSet<TextureArraySampler>);
 }
 
 #[derive(Default)]

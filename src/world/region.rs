@@ -25,6 +25,7 @@ pub const SUBREGION_COUNT: u8 = REGION_SIZE / SUBREGION_SIZE;
 pub const SUBCHUNK_SIZE: u8 = SUBREGION_SIZE + 2;
 pub const MAX_LOD: u8 = REGION_SIZE.ilog2() as u8;
 
+#[derive(Clone)]
 pub struct Region {
     pos: RegionPos,
     lod: u8,
@@ -354,6 +355,7 @@ impl Region {
     }
 }
 
+#[derive(Clone)]
 pub struct RegionModel {
     near: Option<Volume<SwapPair<ChunkModel>>>,
     far: Option<SwapPair<ChunkModel>>,
@@ -363,8 +365,8 @@ pub struct RegionModel {
 
 #[derive(Clone)]
 pub struct ChunkModel {
-    blocks: Geometry<NormTexVertex>,
-    occlusion: Geometry<AlphaVertex>,
+    blocks: Option<Geometry<NormTexVertex>>,
+    occlusion: Option<Geometry<AlphaVertex>>,
 }
 
 impl Render<NormTexVertex, IntTransInst> for RegionModel {
@@ -375,9 +377,11 @@ impl Render<NormTexVertex, IntTransInst> for RegionModel {
             false => {
                 if let Some(models) = &self.near {
                     for pair in models.vec.iter() {
-                        if let Some(model) = pair.get() {
+                        if let Some(model) = pair.get()
+                            && let Some(blocks) = &model.blocks
+                        {
                             items.push(RenderItem {
-                                geometry: &model.blocks,
+                                geometry: blocks,
                                 instances: &self.pos,
                             });
                         }
@@ -387,9 +391,11 @@ impl Render<NormTexVertex, IntTransInst> for RegionModel {
 
             true => {
                 if let Some(pair) = &self.far {
-                    if let Some(model) = pair.get() {
+                    if let Some(model) = pair.get()
+                        && let Some(blocks) = &model.blocks
+                    {
                         items.push(RenderItem {
-                            geometry: &model.blocks,
+                            geometry: blocks,
                             instances: &self.pos,
                         });
                     }
@@ -409,9 +415,11 @@ impl Render<AlphaVertex, IntTransInst> for RegionModel {
             false => {
                 if let Some(models) = &self.near {
                     for pair in models.vec.iter() {
-                        if let Some(model) = pair.get() {
+                        if let Some(model) = pair.get()
+                            && let Some(occlusion) = &model.occlusion
+                        {
                             items.push(RenderItem {
-                                geometry: &model.occlusion,
+                                geometry: occlusion,
                                 instances: &self.pos,
                             });
                         }
@@ -421,9 +429,11 @@ impl Render<AlphaVertex, IntTransInst> for RegionModel {
 
             true => {
                 if let Some(pair) = &self.far {
-                    if let Some(model) = pair.get() {
+                    if let Some(model) = pair.get()
+                        && let Some(occlusion) = &model.occlusion
+                    {
                         items.push(RenderItem {
-                            geometry: &model.occlusion,
+                            geometry: occlusion,
                             instances: &self.pos,
                         });
                     }
@@ -449,13 +459,17 @@ impl RegionModel {
     }
 
     fn update(&mut self, canvas: &Canvas, result: MeshingResult) {
-        let model = if result.blocks.is_empty() || result.occlusion.is_empty() {
-            None
-        } else {
-            Some(ChunkModel {
-                blocks: result.blocks.geometry(canvas, "block"),
-                occlusion: result.occlusion.geometry(canvas, "occlusion"),
-            })
+        let model = ChunkModel {
+            blocks: if result.blocks.is_empty() {
+                None
+            } else {
+                Some(result.blocks.geometry(canvas, "block"))
+            },
+            occlusion: if result.occlusion.is_empty() {
+                None
+            } else {
+                Some(result.occlusion.geometry(canvas, "occlusion"))
+            },
         };
 
         match result.pos {

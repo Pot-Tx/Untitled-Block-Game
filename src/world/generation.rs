@@ -1,18 +1,19 @@
 use crate::ecs::Resource;
 use crate::util::bounding::AABB;
 use crate::util::collection::Volume;
-use crate::util::coord::{Axis, Coord3};
+use crate::util::coord::{Axis, Coord3, ICoord3};
 use crate::world::block::Meta;
 use crate::world::region::*;
-use crate::world::{BlockPos, Chunk, RegionPos, WorldThreads, LOD_COUNT};
+use crate::world::{BlockPos, Chunk, RegionPos, RingVolume, WorldThreads, LOD_COUNT};
+use anyhow::{anyhow, Result};
 use crossbeam_channel::{Receiver, Sender};
-use glam::{U8Vec3, Vec3};
+use glam::{IVec3, U8Vec3, Vec3};
 use log::error;
 use rand::RngExt;
 use rand_pcg::Pcg64Mcg;
 use rand_seeder::Seeder;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use smallvec::{smallvec, SmallVec};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 use std::sync::{Arc, RwLock};
 
@@ -25,28 +26,6 @@ pub struct Field {
     pub ventilation: fn(BlockPos) -> f32,
     pub humidity: fn(BlockPos) -> f32,
     pub density: fn(BlockPos) -> f32,
-}
-
-impl Field {
-    pub fn get(&self, pos: BlockPos) -> Sample {
-        let mut gradient = Vec3::ZERO;
-        let offset = (SAMPLE_INTERVAL / 2) as i32;
-        Axis::ALL.iter().for_each(|&axis| {
-            gradient = gradient.shift(
-                axis,
-                (self.density)(pos.shift(axis, offset)) - (self.density)(pos.shift(axis, -offset)),
-            );
-        });
-        gradient /= SAMPLE_INTERVAL as f32;
-
-        Sample {
-            temperature: (self.temperature)(pos),
-            ventilation: (self.ventilation)(pos),
-            humidity: (self.humidity)(pos),
-            density: (self.density)(pos),
-            gradient,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -107,7 +86,7 @@ impl MulAssign<f32> for Sample {
 }
 
 pub struct Structure {
-    pub blocks: [Volume<Option<Meta>>; LOD_COUNT],
+    pub blocks: SmallVec<[Volume<Option<Meta>>; LOD_COUNT]>,
     pub condition: fn(&Grid, LocalPos) -> bool,
     pub count: u16,
 }
@@ -127,14 +106,7 @@ impl Structure {
         let blocks3 = Volume::splat(U8Vec3::new(1, 1, 1), Some(5));
 
         Self {
-            blocks: [
-                blocks0,
-                blocks1,
-                blocks2,
-                blocks3.clone(),
-                blocks3.clone(),
-                blocks3,
-            ],
+            blocks: smallvec![blocks0, blocks1, blocks2, blocks3,],
             condition: |grid, pos| -> bool {
                 let base = pos + U8Vec3::new(2, 0, 2);
 
@@ -145,14 +117,14 @@ impl Structure {
 
                 for dy in 3..6 {
                     let trunk = grid.sample(base.shift(Axis::Y, dy), 0);
-                    if trunk.density > 0.0 || trunk.ventilation < 0.0 {
+                    if trunk.density > 0.0 && trunk.ventilation < 0.0 {
                         return false;
                     }
                 }
 
                 true
             },
-            count: 256,
+            count: 64,
         }
     }
 }
@@ -233,8 +205,8 @@ pub struct Generator {
 
 pub struct GenContext {
     field: Field,
-    grids: RwLock<HashMap<RegionPos, Grid>>,
-    sites: RwLock<HashMap<RegionPos, Vec<Vec<LocalPos>>>>,
+    grids: RwLock<RingVolume<Grid>>,
+    sites: RwLock<RingVolume<Vec<Vec<LocalPos>>>>,
 
     terrain: fn(Sample) -> Meta,
     structures: Vec<Structure>,
@@ -243,6 +215,8 @@ pub struct GenContext {
 
 impl Generator {
     pub fn new(
+        center: RegionPos,
+        radius: u8,
         field: Field,
         terrain: fn(Sample) -> Meta,
         structures: Vec<Structure>,
@@ -252,8 +226,8 @@ impl Generator {
         Self {
             context: Arc::new(GenContext {
                 field,
-                grids: RwLock::new(HashMap::new()),
-                sites: RwLock::new(HashMap::new()),
+                grids: RwLock::new(RingVolume::new(center, radius)),
+                sites: RwLock::new(RingVolume::new(center, radius)),
 
                 terrain,
                 structures,
@@ -263,7 +237,9 @@ impl Generator {
         }
     }
 
-    pub fn update(&mut self, threads: &WorldThreads) {
+    pub fn update(&mut self, translation: IVec3, threads: &WorldThreads) {
+        self.context.update(translation);
+
         let WorldThreads(near_threads, far_threads) = threads;
 
         let mut near_tasks = Vec::new();
@@ -291,7 +267,9 @@ impl Generator {
     }
 
     fn perform(context: &GenContext, task: GenTask) {
-        let grid = context.grid(task.pos - 1, 3);
+        let Ok(grid) = context.samples(task.pos - 1, 3) else {
+            return;
+        };
         let origin = REGION_SIZE - Region::block_size_on_lod(task.lod);
         let size = Region::chunk_size_on_lod(task.lod);
 
@@ -300,31 +278,36 @@ impl Generator {
             (context.terrain)(sample)
         });
 
-        let sites = context.sites(task.pos - 1, 2);
-        let origin = U8Vec3::splat(REGION_SIZE >> task.lod) - 1;
-        let bound = AABB {
-            min: origin,
-            max: origin + Region::chunk_size_on_lod(task.lod),
+        let Ok(sites) = context.sites(task.pos - 1, 2) else {
+            return;
         };
+        let s = U8Vec3::splat(REGION_SIZE >> task.lod);
+        let bound = if task.lod == 0 {
+            AABB {
+                min: s - 1,
+                max: 2 * s + 1,
+            }
+        } else {
+            AABB { min: s, max: 2 * s }
+        };
+        let origin = s - 1;
 
         for (struct_sites, structure) in sites.iter().zip(context.structures.iter()) {
-            let blocks = &structure.blocks[task.lod as usize];
-            let struct_bound = AABB {
-                min: U8Vec3::ZERO,
-                max: blocks.size,
-            };
+            if let Some(blocks) = structure.blocks.get(task.lod as usize) {
+                let struct_bound = AABB {
+                    min: U8Vec3::ZERO,
+                    max: blocks.size,
+                };
 
-            for &site in struct_sites.iter() {
-                let pos = site >> task.lod;
-                let struct_bound = struct_bound.translate(pos);
+                for &site in struct_sites.iter() {
+                    let struct_bound = struct_bound.translate(site >> task.lod);
 
-                let pos = struct_bound.min.saturating_sub(bound.min);
-                let min = bound.min.saturating_sub(struct_bound.min);
-                let max = blocks
-                    .size
-                    .saturating_sub(struct_bound.max.saturating_sub(bound.max));
-                if min.max_element() < max.min_element() {
-                    chunk.place(pos, blocks.part(min, max - min));
+                    if let Some(intersection) = bound.intersection(struct_bound) {
+                        let pos = intersection.min - origin;
+                        let min = intersection.min - struct_bound.min;
+                        let size = intersection.max - intersection.min;
+                        chunk.place(pos, blocks.part(min, size));
+                    }
                 }
             }
         }
@@ -351,7 +334,12 @@ impl Generator {
 }
 
 impl GenContext {
-    fn grid(&self, pos: RegionPos, side: u8) -> Grid {
+    fn update(&self, translation: IVec3) {
+        self.grids.write().unwrap().translate(translation);
+        self.sites.write().unwrap().translate(translation);
+    }
+
+    fn samples(&self, pos: RegionPos, side: u8) -> Result<Grid> {
         let mut area_grid = Grid::new(U8Vec3::splat((UNIT_GRID_SIZE - 1) * side + 1));
 
         for dx in 0..side {
@@ -360,26 +348,68 @@ impl GenContext {
                     let offset = U8Vec3::new(dx, dy, dz);
                     let pos = pos + offset.as_ivec3();
 
-                    if !self.grids.read().unwrap().contains_key(&pos) {
-                        let mut grids = self.grids.write().unwrap();
-                        let origin = pos * REGION_SIZE as i32;
-                        let region_grid = Volume::from_fn(U8Vec3::splat(UNIT_GRID_SIZE), |pos| {
-                            self.field
-                                .get(origin + pos.as_ivec3() * SAMPLE_INTERVAL as i32)
-                        });
-                        grids.insert(pos, region_grid);
+                    {
+                        let grids = self.grids.read().unwrap();
+                        if !grids.bound.is_point_inside(pos) {
+                            return Err(anyhow!("Region pos out of bound"));
+                        }
+                        if let Some(region_grid) = grids.get(pos) {
+                            area_grid.fit(offset * (UNIT_GRID_SIZE - 1), region_grid);
+                            continue;
+                        }
                     }
 
-                    let grids = self.grids.read().unwrap();
-                    area_grid.fit(offset * (UNIT_GRID_SIZE - 1), grids.get(&pos).unwrap());
+                    {
+                        let mut grids = self.grids.write().unwrap();
+                        let origin = pos * REGION_SIZE as i32;
+                        let mut region_grid =
+                            Volume::from_fn(U8Vec3::splat(UNIT_GRID_SIZE + 2), |pos| {
+                                let pos = origin + (pos.as_ivec3() - 1) * SAMPLE_INTERVAL as i32;
+                                Sample {
+                                    temperature: (self.field.temperature)(pos),
+                                    ventilation: (self.field.ventilation)(pos),
+                                    humidity: (self.field.humidity)(pos),
+                                    density: (self.field.density)(pos),
+                                    gradient: Vec3::ZERO,
+                                }
+                            });
+                        for x in 1..UNIT_GRID_SIZE + 1 {
+                            for y in 1..UNIT_GRID_SIZE + 1 {
+                                for z in 1..UNIT_GRID_SIZE + 1 {
+                                    let pos = U8Vec3::new(x, y, z);
+                                    let mut gradient = Vec3::ZERO;
+                                    for &axis in Axis::ALL {
+                                        gradient = gradient
+                                            .shift(
+                                                axis,
+                                                region_grid
+                                                    .get(pos.step(axis.direction(true)))
+                                                    .density,
+                                            )
+                                            .shift(
+                                                axis,
+                                                -region_grid
+                                                    .get(pos.step(axis.direction(false)))
+                                                    .density,
+                                            );
+                                    }
+                                    gradient /= (SAMPLE_INTERVAL * 2) as f32;
+                                    region_grid.get_mut(pos).gradient = gradient;
+                                }
+                            }
+                        }
+                        region_grid = region_grid.part(U8Vec3::ONE, U8Vec3::splat(UNIT_GRID_SIZE));
+                        area_grid.fit(offset * (UNIT_GRID_SIZE - 1), &region_grid);
+                        grids.set(pos, region_grid);
+                    }
                 }
             }
         }
 
-        area_grid
+        Ok(area_grid)
     }
 
-    fn sites(&self, pos: RegionPos, side: u8) -> Vec<Vec<LocalPos>> {
+    fn sites(&self, pos: RegionPos, side: u8) -> Result<Vec<Vec<LocalPos>>> {
         let mut area_sites = vec![Vec::new(); self.structures.len()];
 
         for dx in 0..side {
@@ -388,9 +418,26 @@ impl GenContext {
                     let offset = U8Vec3::new(dx, dy, dz);
                     let pos = pos + offset.as_ivec3();
 
-                    if !self.sites.read().unwrap().contains_key(&pos) {
+                    {
+                        let sites = self.sites.read().unwrap();
+                        if !sites.bound.is_point_inside(pos) {
+                            return Err(anyhow!("Region pos out of bound"));
+                        }
+                        if let Some(region_sites) = sites.get(pos) {
+                            area_sites.iter_mut().zip(region_sites.iter()).for_each(
+                                |(struct_sites, region_sites)| {
+                                    for site in region_sites.iter() {
+                                        struct_sites.push(site + offset * REGION_SIZE);
+                                    }
+                                },
+                            );
+                            continue;
+                        }
+                    }
+
+                    {
                         let mut sites = self.sites.write().unwrap();
-                        let grid = self.grid(pos, 2);
+                        let grid = self.samples(pos, 2)?;
                         let region_sites = self
                             .structures
                             .iter()
@@ -406,24 +453,21 @@ impl GenContext {
                                 }
                                 struct_sites
                             })
-                            .collect();
-                        sites.insert(pos, region_sites);
+                            .collect::<Vec<_>>();
+                        area_sites.iter_mut().zip(region_sites.iter()).for_each(
+                            |(struct_sites, region_sites)| {
+                                for site in region_sites.iter() {
+                                    struct_sites.push(site + offset * REGION_SIZE);
+                                }
+                            },
+                        );
+                        sites.set(pos, region_sites);
                     }
-
-                    let sites = self.sites.read().unwrap();
-                    let region_sites = sites.get(&pos).unwrap();
-                    area_sites.iter_mut().zip(region_sites.iter()).for_each(
-                        |(struct_sites, region_sites)| {
-                            for site in region_sites.iter() {
-                                struct_sites.push(site + offset * REGION_SIZE);
-                            }
-                        },
-                    );
                 }
             }
         }
 
-        area_sites
+        Ok(area_sites)
     }
 }
 

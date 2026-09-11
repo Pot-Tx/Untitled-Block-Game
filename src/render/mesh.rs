@@ -57,7 +57,7 @@ impl<V: Vertex> Mesh<V> {
 
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty() || self.indices.is_empty()
+        self.indices.is_empty()
     }
 
     #[inline]

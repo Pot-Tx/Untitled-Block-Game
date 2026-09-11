@@ -168,11 +168,11 @@ impl<T> SwapPair<T> {
     }
 
     #[inline]
-    pub fn set(&mut self, item: Option<T>, time: u8) {
+    pub fn set(&mut self, item: T, time: u8) {
         if self.on_right {
-            self.left = item;
+            self.left = Some(item);
         } else {
-            self.right = item;
+            self.right = Some(item);
         }
         self.timer = time;
 

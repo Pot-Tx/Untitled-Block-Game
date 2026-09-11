@@ -354,9 +354,9 @@ impl<T> Volume<T> {
     }
 
     #[inline]
-    pub fn set(&mut self, pos: U8Vec3, value: T) {
+    pub fn set(&mut self, pos: U8Vec3, value: T) -> T {
         let idx = self.idx_of_pos(pos);
-        self.vec[idx] = value;
+        mem::replace(&mut self.vec[idx], value)
     }
 }
 

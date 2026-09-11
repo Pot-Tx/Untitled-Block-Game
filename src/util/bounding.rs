@@ -52,6 +52,23 @@ impl<C: Coord> AABB<C> {
     }
 
     #[inline]
+    pub fn intersection(&self, other: Self) -> Option<Self> {
+        let mut intersection = *self;
+        for i in 0..C::DIM {
+            if other.min[i] > intersection.min[i] {
+                intersection.min[i] = other.min[i];
+            }
+            if other.max[i] < intersection.max[i] {
+                intersection.max[i] = other.max[i];
+            }
+            if intersection.min[i] >= intersection.max[i] {
+                return None;
+            }
+        }
+        Some(intersection)
+    }
+
+    #[inline]
     #[must_use]
     pub fn merge(mut self, other: Self) -> Self {
         (0..C::DIM).for_each(|i| {

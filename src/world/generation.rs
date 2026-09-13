@@ -4,8 +4,9 @@ use crate::util::collection::Volume;
 use crate::util::coord::{Axis, Coord3, ICoord3};
 use crate::world::block::Meta;
 use crate::world::region::*;
-use crate::world::{BlockPos, Chunk, RegionPos, RingVolume, WorldThreads, LOD_COUNT};
+use crate::world::{BlockPos, Chunk, RegionPos, WorldThreads, LOD_COUNT};
 use anyhow::{anyhow, Result};
+use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec3, U8Vec3, Vec3};
 use log::error;
@@ -15,26 +16,153 @@ use rand_seeder::Seeder;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
-pub type Grid = Volume<Sample>;
-pub const SAMPLE_INTERVAL: u8 = 8;
-pub const UNIT_GRID_SIZE: u8 = REGION_SIZE / SAMPLE_INTERVAL + 1;
+type SampleGrid = Volume<Sample>;
+type SampleGridView = Volume<Arc<SampleGrid>>;
+const SAMPLE_INTERVAL: u8 = 8;
+const GRID_SIZE: u8 = REGION_SIZE / SAMPLE_INTERVAL;
+const GRID_STRIDE: u8 = GRID_SIZE + 1;
+
+impl SampleGridView {
+    fn interpolate(&self, pos: LocalPos, lod: u8, halo: bool) -> Sample {
+        let origin = pos / SAMPLE_INTERVAL;
+        let size = Region::block_size_on_lod(lod);
+        let offset = (size / SAMPLE_INTERVAL).max(1);
+        let corners = U8Vec3::corners(U8Vec3::ZERO, U8Vec3::ONE);
+        let samples = corners.map(|corner| {
+            let pos = origin + corner * offset;
+            let grid_pos = (pos / GRID_SIZE).min(self.size - 1);
+            let pos = pos - grid_pos * GRID_SIZE;
+            *self.get(grid_pos).get(pos)
+        });
+
+        let redirection = if halo {
+            let mut min = 1.0;
+            let mut min_corner = U8Vec3::ZERO;
+            for (&corner, sample) in corners.iter().zip(samples) {
+                let d = sample.density.min(-sample.erosion);
+                if d < min {
+                    min = d;
+                    min_corner = corner;
+                }
+            }
+            min_corner * (size - 1)
+        } else {
+            U8Vec3::splat(size / 2)
+        };
+        let rate =
+            (pos % SAMPLE_INTERVAL + redirection).as_vec3() / (offset * SAMPLE_INTERVAL) as f32;
+
+        let mut value = Sample::default();
+
+        for (&corner, sample) in corners.iter().zip(samples) {
+            let weight = (rate - (1 - corner).as_vec3()).abs();
+            value += sample * weight.element_product();
+        }
+
+        value
+    }
+}
+
+pub struct ArcRingVolume<T> {
+    pub volume: Volume<ArcSwapOption<T>>,
+    pub bound: ArcSwap<AABB<IVec3>>,
+}
+
+unsafe impl<T> Sync for ArcRingVolume<T> {}
+
+impl<T> ArcRingVolume<T> {
+    pub fn new(center: IVec3, radius: u8) -> Self {
+        Self {
+            volume: Volume::from_fn(U8Vec3::splat(radius * 2 + 1), |_| ArcSwapOption::empty()),
+            bound: ArcSwap::new(Arc::new(AABB {
+                min: center - radius as i32,
+                max: center + radius as i32 + 1,
+            })),
+        }
+    }
+
+    #[inline]
+    fn cast_pos(&self, pos: IVec3) -> U8Vec3 {
+        pos.rem_euclid(self.volume.size.as_ivec3()).as_u8vec3()
+    }
+
+    pub fn get(&self, pos: IVec3) -> Result<Option<Arc<T>>> {
+        if self.bound.load().is_point_inside(pos) {
+            Ok(self.volume.get(self.cast_pos(pos)).load_full())
+        } else {
+            Err(anyhow!("Pos out of bound"))
+        }
+    }
+
+    pub fn set(&self, pos: IVec3, value: T) -> Result<Option<Arc<T>>> {
+        if self.bound.load().is_point_inside(pos) {
+            Ok(self
+                .volume
+                .get(self.cast_pos(pos))
+                .swap(Some(Arc::new(value))))
+        } else {
+            Err(anyhow!("Pos out of bound"))
+        }
+    }
+
+    pub fn translate(&self, dpos: IVec3) {
+        let bound = self.bound.load();
+        let new_bound = bound.translate(dpos);
+
+        for &axis in Axis::ALL {
+            let d = dpos.get(axis);
+            if d != 0 {
+                let (min, max) = match d > 0 {
+                    false => (new_bound.max.get(axis), bound.max.get(axis)),
+                    true => (bound.min.get(axis), new_bound.min.get(axis)),
+                };
+
+                let size = self.volume.size.get(axis) as i32;
+                let min = min.rem_euclid(size) as u8;
+                let max = max.rem_euclid(size) as u8;
+
+                if min < max {
+                    self.volume
+                        .iter(
+                            U8Vec3::ZERO.with(axis, min),
+                            self.volume.size.with(axis, max),
+                        )
+                        .for_each(|item| {
+                            item.swap(None);
+                        });
+                } else {
+                    self.volume
+                        .iter(U8Vec3::ZERO, self.volume.size.with(axis, max))
+                        .for_each(|item| {
+                            item.swap(None);
+                        });
+                    self.volume
+                        .iter(U8Vec3::ZERO.with(axis, min), self.volume.size)
+                        .for_each(|item| {
+                            item.swap(None);
+                        });
+                }
+            }
+        }
+
+        self.bound.swap(Arc::new(new_bound));
+    }
+}
 
 pub struct Field {
-    pub temperature: fn(BlockPos) -> f32,
-    pub ventilation: fn(BlockPos) -> f32,
-    pub humidity: fn(BlockPos) -> f32,
+    pub climate: fn(BlockPos) -> Vec3,
     pub density: fn(BlockPos) -> f32,
+    pub erosion: fn(BlockPos) -> f32,
 }
 
 #[derive(Clone, Copy, Default)]
 pub struct Sample {
-    pub temperature: f32,
-    pub ventilation: f32,
-    pub humidity: f32,
+    pub climate: Vec3,
     pub density: f32,
     pub gradient: Vec3,
+    pub erosion: f32,
 }
 
 impl Add for Sample {
@@ -42,22 +170,20 @@ impl Add for Sample {
 
     fn add(self, rhs: Self) -> Self::Output {
         Self {
-            temperature: self.temperature + rhs.temperature,
-            ventilation: self.ventilation + rhs.ventilation,
-            humidity: self.humidity + rhs.humidity,
+            climate: self.climate + rhs.climate,
             density: self.density + rhs.density,
             gradient: self.gradient + rhs.gradient,
+            erosion: self.erosion + rhs.erosion,
         }
     }
 }
 
 impl AddAssign for Sample {
     fn add_assign(&mut self, rhs: Self) {
-        self.temperature += rhs.temperature;
-        self.ventilation += rhs.ventilation;
-        self.humidity += rhs.humidity;
+        self.climate += rhs.climate;
         self.density += rhs.density;
         self.gradient += rhs.gradient;
+        self.erosion += rhs.erosion;
     }
 }
 
@@ -66,28 +192,26 @@ impl Mul<f32> for Sample {
 
     fn mul(self, rhs: f32) -> Self::Output {
         Self {
-            temperature: self.temperature * rhs,
-            ventilation: self.ventilation * rhs,
-            humidity: self.humidity * rhs,
+            climate: self.climate * rhs,
             density: self.density * rhs,
             gradient: self.gradient * rhs,
+            erosion: self.erosion * rhs,
         }
     }
 }
 
 impl MulAssign<f32> for Sample {
     fn mul_assign(&mut self, rhs: f32) {
-        self.temperature *= rhs;
-        self.ventilation *= rhs;
-        self.humidity *= rhs;
+        self.climate *= rhs;
         self.density *= rhs;
         self.gradient *= rhs;
+        self.erosion *= rhs;
     }
 }
 
 pub struct Structure {
     pub blocks: SmallVec<[Volume<Option<Meta>>; LOD_COUNT]>,
-    pub condition: fn(&Grid, LocalPos) -> bool,
+    pub condition: fn(&SampleGridView, LocalPos) -> bool,
     pub count: u16,
 }
 
@@ -107,17 +231,17 @@ impl Structure {
 
         Self {
             blocks: smallvec![blocks0, blocks1, blocks2, blocks3,],
-            condition: |grid, pos| -> bool {
+            condition: |view, pos| -> bool {
                 let base = pos + U8Vec3::new(2, 0, 2);
 
-                let root = grid.sample(base, 0);
-                if !(root.density > 0.0 && root.ventilation < 0.0 && root.density < 0.125) {
+                let root = view.interpolate(base, 0, false);
+                if !(root.density > 0.0 && root.erosion < 0.0 && root.density < 0.125) {
                     return false;
                 }
 
                 for dy in 3..6 {
-                    let trunk = grid.sample(base.shift(Axis::Y, dy), 0);
-                    if trunk.density > 0.0 && trunk.ventilation < 0.0 {
+                    let trunk = view.interpolate(base.shift(Axis::Y, dy), 0, false);
+                    if trunk.density > 0.0 && trunk.erosion < 0.0 {
                         return false;
                     }
                 }
@@ -129,75 +253,6 @@ impl Structure {
     }
 }
 
-impl Grid {
-    fn sample(&self, pos: LocalPos, lod: u8) -> Sample {
-        let origin = pos / SAMPLE_INTERVAL;
-        let size = Region::block_size_on_lod(lod);
-        let offset = (size / SAMPLE_INTERVAL).max(1);
-        let corners = U8Vec3::corners(U8Vec3::ZERO, U8Vec3::ONE);
-
-        let pos = if size == 1 {
-            pos
-        } else {
-            let mut min_density = 1.0;
-            let mut min_corner = U8Vec3::ZERO;
-            for corner in corners {
-                let density = self.get(origin + corner * offset).density;
-                if density < min_density {
-                    min_density = density;
-                    min_corner = corner;
-                }
-            }
-            pos + min_corner * (size - 1)
-        };
-        let interval = offset * SAMPLE_INTERVAL;
-        let rate = (pos % interval).as_vec3() / interval as f32;
-
-        let mut sample = Sample {
-            temperature: 0.0,
-            ventilation: 0.0,
-            humidity: 0.0,
-            density: 0.0,
-            gradient: Vec3::ZERO,
-        };
-
-        for corner in corners {
-            let offset = corner * offset;
-            let weight = (rate - (1 - corner).as_vec3()).abs();
-
-            sample += *self.get(origin + offset) * weight.element_product();
-        }
-
-        sample
-    }
-}
-
-impl Chunk {
-    fn place(&mut self, pos: LocalPos, blocks: Volume<Option<Meta>>) {
-        let max = pos + blocks.size;
-        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
-
-        let [w, h, _] = self.size.as_usizevec3().to_array();
-        let [sw, sh, sd] = blocks.size.as_usizevec3().to_array();
-        let [dx, dy, dz] = pos.as_usizevec3().to_array();
-
-        for z in 0..sd {
-            for y in 0..sh {
-                let src = z * sh * sw + y * sw;
-                let dst = (z + dz) * h * w + (y + dy) * w + dx;
-                for (dst, src) in self.vec[dst..dst + sw]
-                    .iter_mut()
-                    .zip(blocks.vec[src..src + sw].iter())
-                {
-                    if let Some(meta) = src {
-                        *dst = *meta;
-                    }
-                }
-            }
-        }
-    }
-}
-
 pub struct Generator {
     context: Arc<GenContext>,
     task_rx: Receiver<GenTask>,
@@ -205,8 +260,8 @@ pub struct Generator {
 
 pub struct GenContext {
     field: Field,
-    grids: RwLock<RingVolume<Grid>>,
-    sites: RwLock<RingVolume<Vec<Vec<LocalPos>>>>,
+    grids: ArcRingVolume<SampleGrid>,
+    sites: ArcRingVolume<Vec<Vec<LocalPos>>>,
 
     terrain: fn(Sample) -> Meta,
     structures: Vec<Structure>,
@@ -226,8 +281,8 @@ impl Generator {
         Self {
             context: Arc::new(GenContext {
                 field,
-                grids: RwLock::new(RingVolume::new(center, radius)),
-                sites: RwLock::new(RingVolume::new(center, radius)),
+                grids: ArcRingVolume::new(center, radius),
+                sites: ArcRingVolume::new(center, radius),
 
                 terrain,
                 structures,
@@ -267,18 +322,22 @@ impl Generator {
     }
 
     fn perform(context: &GenContext, task: GenTask) {
-        let Ok(grid) = context.samples(task.pos - 1, 3) else {
+        let Ok(view) = context.samples_in_range(task.pos - 1, 3) else {
             return;
         };
         let origin = REGION_SIZE - Region::block_size_on_lod(task.lod);
-        let size = Region::chunk_size_on_lod(task.lod);
+        let stride = Region::stride_on_lod(task.lod);
 
-        let mut chunk = Chunk::from_fn(U8Vec3::splat(size), |pos| {
-            let sample = grid.sample(origin + pos * Region::block_size_on_lod(task.lod), task.lod);
+        let mut chunk = Chunk::from_fn(U8Vec3::splat(stride), |pos| {
+            let sample = view.interpolate(
+                origin + pos * Region::block_size_on_lod(task.lod),
+                task.lod,
+                pos.min_element() == 0 || pos.max_element() == stride - 1,
+            );
             (context.terrain)(sample)
         });
 
-        let Ok(sites) = context.sites(task.pos - 1, 2) else {
+        let Ok(sites) = context.sites_in_range(task.pos - 1, 2) else {
             return;
         };
         let s = U8Vec3::splat(REGION_SIZE >> task.lod);
@@ -303,18 +362,25 @@ impl Generator {
                     let struct_bound = struct_bound.translate(site >> task.lod);
 
                     if let Some(intersection) = bound.intersection(struct_bound) {
-                        let pos = intersection.min - origin;
-                        let min = intersection.min - struct_bound.min;
-                        let size = intersection.max - intersection.min;
-                        chunk.place(pos, blocks.part(min, size));
+                        chunk
+                            .iter_mut(intersection.min - origin, intersection.max - origin)
+                            .zip(blocks.iter(
+                                intersection.min - struct_bound.min,
+                                intersection.max - struct_bound.min,
+                            ))
+                            .for_each(|(chunk_meta, &struct_meta)| {
+                                if let Some(meta) = struct_meta {
+                                    *chunk_meta = meta;
+                                }
+                            });
                     }
                 }
             }
         }
 
-        for x in 1..size - 1 {
-            for y in 1..size - 1 {
-                for z in 1..size - 1 {
+        for x in 1..stride - 1 {
+            for y in 1..stride - 1 {
+                for z in 1..stride - 1 {
                     let pos = LocalPos::new(x, y, z);
                     let meta = (context.after)(*chunk.get(pos), &chunk, pos);
                     chunk.set(pos, meta);
@@ -335,12 +401,12 @@ impl Generator {
 
 impl GenContext {
     fn update(&self, translation: IVec3) {
-        self.grids.write().unwrap().translate(translation);
-        self.sites.write().unwrap().translate(translation);
+        self.grids.translate(translation);
+        self.sites.translate(translation);
     }
 
-    fn samples(&self, pos: RegionPos, side: u8) -> Result<Grid> {
-        let mut area_grid = Grid::new(U8Vec3::splat((UNIT_GRID_SIZE - 1) * side + 1));
+    fn samples_in_range(&self, pos: RegionPos, side: u8) -> Result<SampleGridView> {
+        let mut vec = Vec::with_capacity((side as usize).pow(3));
 
         for dx in 0..side {
             for dy in 0..side {
@@ -348,69 +414,58 @@ impl GenContext {
                     let offset = U8Vec3::new(dx, dy, dz);
                     let pos = pos + offset.as_ivec3();
 
-                    {
-                        let grids = self.grids.read().unwrap();
-                        if !grids.bound.is_point_inside(pos) {
-                            return Err(anyhow!("Region pos out of bound"));
-                        }
-                        if let Some(region_grid) = grids.get(pos) {
-                            area_grid.fit(offset * (UNIT_GRID_SIZE - 1), region_grid);
-                            continue;
-                        }
-                    }
-
-                    {
-                        let mut grids = self.grids.write().unwrap();
+                    if self.grids.get(pos)?.is_none() {
                         let origin = pos * REGION_SIZE as i32;
-                        let mut region_grid =
-                            Volume::from_fn(U8Vec3::splat(UNIT_GRID_SIZE + 2), |pos| {
-                                let pos = origin + (pos.as_ivec3() - 1) * SAMPLE_INTERVAL as i32;
-                                Sample {
-                                    temperature: (self.field.temperature)(pos),
-                                    ventilation: (self.field.ventilation)(pos),
-                                    humidity: (self.field.humidity)(pos),
-                                    density: (self.field.density)(pos),
-                                    gradient: Vec3::ZERO,
-                                }
-                            });
-                        for x in 1..UNIT_GRID_SIZE + 1 {
-                            for y in 1..UNIT_GRID_SIZE + 1 {
-                                for z in 1..UNIT_GRID_SIZE + 1 {
+
+                        let mut grid = Volume::from_fn(U8Vec3::splat(GRID_STRIDE + 2), |pos| {
+                            let pos = origin + (pos.as_ivec3() - 1) * SAMPLE_INTERVAL as i32;
+                            Sample {
+                                climate: (self.field.climate)(pos),
+                                density: (self.field.density)(pos),
+                                gradient: Vec3::ZERO,
+                                erosion: (self.field.erosion)(pos),
+                            }
+                        });
+
+                        for x in 1..=GRID_STRIDE {
+                            for y in 1..=GRID_STRIDE {
+                                for z in 1..=GRID_STRIDE {
                                     let pos = U8Vec3::new(x, y, z);
                                     let mut gradient = Vec3::ZERO;
                                     for &axis in Axis::ALL {
                                         gradient = gradient
                                             .shift(
                                                 axis,
-                                                region_grid
-                                                    .get(pos.step(axis.direction(true)))
-                                                    .density,
+                                                grid.get(pos.step(axis.direction(true))).density,
                                             )
                                             .shift(
                                                 axis,
-                                                -region_grid
-                                                    .get(pos.step(axis.direction(false)))
-                                                    .density,
+                                                -grid.get(pos.step(axis.direction(false))).density,
                                             );
                                     }
                                     gradient /= (SAMPLE_INTERVAL * 2) as f32;
-                                    region_grid.get_mut(pos).gradient = gradient;
+                                    grid.get_mut(pos).gradient = gradient;
                                 }
                             }
                         }
-                        region_grid = region_grid.part(U8Vec3::ONE, U8Vec3::splat(UNIT_GRID_SIZE));
-                        area_grid.fit(offset * (UNIT_GRID_SIZE - 1), &region_grid);
-                        grids.set(pos, region_grid);
+
+                        grid = grid.part(U8Vec3::ONE, U8Vec3::splat(GRID_STRIDE));
+                        self.grids.set(pos, grid)?;
                     }
+
+                    vec.push(self.grids.get(pos)?.unwrap());
                 }
             }
         }
 
-        Ok(area_grid)
+        Ok(SampleGridView {
+            size: U8Vec3::splat(side),
+            vec,
+        })
     }
 
-    fn sites(&self, pos: RegionPos, side: u8) -> Result<Vec<Vec<LocalPos>>> {
-        let mut area_sites = vec![Vec::new(); self.structures.len()];
+    fn sites_in_range(&self, pos: RegionPos, side: u8) -> Result<Vec<Vec<LocalPos>>> {
+        let mut sites = vec![Vec::new(); self.structures.len()];
 
         for dx in 0..side {
             for dy in 0..side {
@@ -418,27 +473,10 @@ impl GenContext {
                     let offset = U8Vec3::new(dx, dy, dz);
                     let pos = pos + offset.as_ivec3();
 
-                    {
-                        let sites = self.sites.read().unwrap();
-                        if !sites.bound.is_point_inside(pos) {
-                            return Err(anyhow!("Region pos out of bound"));
-                        }
-                        if let Some(region_sites) = sites.get(pos) {
-                            area_sites.iter_mut().zip(region_sites.iter()).for_each(
-                                |(struct_sites, region_sites)| {
-                                    for site in region_sites.iter() {
-                                        struct_sites.push(site + offset * REGION_SIZE);
-                                    }
-                                },
-                            );
-                            continue;
-                        }
-                    }
+                    if self.sites.get(pos)?.is_none() {
+                        let grid = self.samples_in_range(pos, 2)?;
 
-                    {
-                        let mut sites = self.sites.write().unwrap();
-                        let grid = self.samples(pos, 2)?;
-                        let region_sites = self
+                        let sites = self
                             .structures
                             .iter()
                             .enumerate()
@@ -454,20 +492,23 @@ impl GenContext {
                                 struct_sites
                             })
                             .collect::<Vec<_>>();
-                        area_sites.iter_mut().zip(region_sites.iter()).for_each(
-                            |(struct_sites, region_sites)| {
-                                for site in region_sites.iter() {
-                                    struct_sites.push(site + offset * REGION_SIZE);
-                                }
-                            },
-                        );
-                        sites.set(pos, region_sites);
+
+                        self.sites.set(pos, sites)?;
                     }
+
+                    sites
+                        .iter_mut()
+                        .zip(self.sites.get(pos)?.unwrap().iter())
+                        .for_each(|(struct_sites, region_sites)| {
+                            for site in region_sites.iter() {
+                                struct_sites.push(site + offset * REGION_SIZE);
+                            }
+                        });
                 }
             }
         }
 
-        Ok(area_sites)
+        Ok(sites)
     }
 }
 

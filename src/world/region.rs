@@ -21,8 +21,8 @@ pub type LocalPos = U8Vec3;
 pub type SubRegionPos = U8Vec3;
 pub const REGION_SIZE: u8 = 32;
 pub const SUBREGION_SIZE: u8 = 16;
+pub const SUBREGION_STRIDE: u8 = SUBREGION_SIZE + 2;
 pub const SUBREGION_COUNT: u8 = REGION_SIZE / SUBREGION_SIZE;
-pub const SUBCHUNK_SIZE: u8 = SUBREGION_SIZE + 2;
 pub const MAX_LOD: u8 = REGION_SIZE.ilog2() as u8;
 
 #[derive(Clone)]
@@ -105,7 +105,12 @@ impl Region {
     }
 
     #[inline]
-    pub const fn chunk_size_on_lod(lod: u8) -> u8 {
+    pub const fn size_on_lod(lod: u8) -> u8 {
+        REGION_SIZE >> lod
+    }
+
+    #[inline]
+    pub const fn stride_on_lod(lod: u8) -> u8 {
         (REGION_SIZE >> lod) + 2
     }
 
@@ -189,7 +194,8 @@ impl Region {
                         match self.meshing_tx.try_send(MeshingTask {
                             lod: self.lod,
                             pos: Some(pos),
-                            chunk: chunk.part(pos * SUBREGION_SIZE, U8Vec3::splat(SUBCHUNK_SIZE)),
+                            chunk: chunk
+                                .part(pos * SUBREGION_SIZE, U8Vec3::splat(SUBREGION_STRIDE)),
                             tx: self.mesh_tx.clone(),
                         }) {
                             Ok(_) => self.meshing += 1,

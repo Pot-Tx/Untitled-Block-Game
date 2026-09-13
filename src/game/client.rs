@@ -8,7 +8,7 @@ use crate::util::coord::{Direction, ICoord3};
 use crate::util::OnceInit;
 use crate::world::*;
 use crossbeam_channel::unbounded;
-use glam::Vec3Swizzles;
+use glam::{Vec3, Vec3Swizzles};
 use noise_functions::{CellDistanceSq, Noise, Perlin};
 use rayon::ThreadPoolBuilder;
 use smallvec::smallvec;
@@ -163,34 +163,15 @@ impl GameClient {
             .register(WorldThreads(near_threads, far_threads));
         simulation.resources.register(World::new(
             RegionPos::ZERO,
-            smallvec![1, 3, 5, 7],
+            smallvec![3, 7, 13, 21],
             gen_tx,
             meshing_tx,
         ));
         simulation.resources.register(Generator::new(
             RegionPos::ZERO,
-            8,
+            22,
             Field {
-                temperature: |_| -> f32 { 0.0 },
-                ventilation: |pos| -> f32 {
-                    let mut pos = pos.as_vec3();
-                    pos.y *= 2.0;
-
-                    let v1 = CellDistanceSq::default()
-                        .jitter(0.75)
-                        .frequency(0.03125)
-                        .sample3(pos);
-
-                    let v2 = CellDistanceSq::default()
-                        .jitter(1.25)
-                        .frequency(0.03125)
-                        .sample3(pos);
-
-                    let v3 = -(pos.y + 128.0) * 0.00390625;
-
-                    (v1 + v2 + v3).tanh()
-                },
-                humidity: |_| -> f32 { 0.0 },
+                climate: |_| -> Vec3 { Vec3::ZERO },
                 density: |pos| -> f32 {
                     let pos = pos.as_vec3();
 
@@ -208,12 +189,30 @@ impl GameClient {
 
                     (d1.tanh() + d2).tanh()
                 },
+                erosion: |pos| -> f32 {
+                    let mut pos = pos.as_vec3();
+                    pos.y *= 2.0;
+
+                    let v1 = CellDistanceSq::default()
+                        .jitter(0.75)
+                        .frequency(0.03125)
+                        .sample3(pos);
+
+                    let v2 = CellDistanceSq::default()
+                        .jitter(1.25)
+                        .frequency(0.03125)
+                        .sample3(pos);
+
+                    let v3 = -(pos.y + 128.0) * 0.00390625;
+
+                    (v1 + v2 + v3).tanh()
+                },
             },
             |sample| -> Meta {
-                if sample.density > 0.0 && sample.ventilation < 0.0 {
+                if sample.density > 0.0 && sample.erosion < 0.0 {
                     if sample.density < 0.125
                         && sample.gradient.y < 0.0
-                        && sample.gradient.xy().length_squared() < 0.00390625
+                        && sample.gradient.xz().length_squared() < 0.00390625
                     {
                         2
                     } else {

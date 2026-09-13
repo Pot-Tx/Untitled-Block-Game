@@ -493,7 +493,7 @@ impl MeshMerger {
 
     #[inline]
     fn bit_of_pos(&self, pos: U8Vec3) -> (usize, u8) {
-        assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
+        debug_assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
 
         let n = self.side as usize;
         let idx = pos.get(self.axes[1]) as usize + pos.get(self.axes[2]) as usize * n;

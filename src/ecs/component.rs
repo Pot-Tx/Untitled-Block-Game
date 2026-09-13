@@ -120,7 +120,7 @@ impl ErasedComponent {
 
     #[inline]
     pub fn get<C: Component>(&self, entity: Id) -> Option<&C> {
-        assert_eq!(self.id, TypeId::of::<C>());
+        debug_assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
             ComponentStorage::Dense(map) => map.get(entity),
             ComponentStorage::Hash(map) => map.get(entity),
@@ -129,7 +129,7 @@ impl ErasedComponent {
 
     #[inline]
     pub fn get_mut<C: Component>(&self, entity: Id) -> Option<&mut C> {
-        assert_eq!(self.id, TypeId::of::<C>());
+        debug_assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
             ComponentStorage::Dense(map) => map.get_mut(entity),
             ComponentStorage::Hash(map) => map.get_mut(entity),
@@ -137,7 +137,7 @@ impl ErasedComponent {
     }
 
     pub fn iter<C: Component>(&self) -> ComponentIter<'_, C> {
-        assert_eq!(self.id, TypeId::of::<C>());
+        debug_assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
             ComponentStorage::Dense(map) => ComponentIter::Dense(map.iter()),
             ComponentStorage::Hash(map) => ComponentIter::Hash(map.iter()),
@@ -145,7 +145,7 @@ impl ErasedComponent {
     }
 
     pub fn iter_mut<C: Component>(&self) -> ComponentIterMut<'_, C> {
-        assert_eq!(self.id, TypeId::of::<C>());
+        debug_assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
             ComponentStorage::Dense(map) => ComponentIterMut::Dense(map.iter_mut()),
             ComponentStorage::Hash(map) => ComponentIterMut::Hash(map.iter_mut()),
@@ -154,7 +154,7 @@ impl ErasedComponent {
 
     #[inline]
     pub fn insert<C: Component>(&mut self, entity: Id, value: C) -> Option<C> {
-        assert_eq!(self.id, TypeId::of::<C>());
+        debug_assert_eq!(self.id, TypeId::of::<C>());
         match &mut self.storage {
             ComponentStorage::Dense(map) => map.insert(entity, value),
             ComponentStorage::Hash(map) => map.insert(entity, value),

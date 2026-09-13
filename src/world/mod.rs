@@ -130,7 +130,7 @@ pub struct World {
 impl Resource for World {}
 
 impl World {
-    const MAX_UPDATE_COST: usize = 32;
+    const MAX_UPDATE_COST: usize = 1024;
 
     pub fn new(
         center: RegionPos,

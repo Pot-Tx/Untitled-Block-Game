@@ -75,7 +75,7 @@ impl ErasedBox {
     pub fn new<T: 'static>(value: T) -> Self {
         let layout = Layout::new::<T>();
         let ptr = unsafe { alloc::alloc(layout) } as *mut T;
-        assert!(!ptr.is_null());
+        debug_assert!(!ptr.is_null());
         unsafe {
             ptr.write(value);
         }
@@ -95,13 +95,13 @@ impl ErasedBox {
 
     #[inline]
     pub fn cast<T: 'static>(&self) -> &T {
-        assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &*(self.ptr as *const T) }
     }
 
     #[inline]
     pub fn cast_mut<T: 'static>(&self) -> &mut T {
-        assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &mut *(self.ptr as *mut T) }
     }
 
@@ -125,7 +125,7 @@ impl ErasedVec {
     #[inline]
     pub fn new<T>() -> Self {
         let len = unsafe { alloc::alloc(Layout::new::<usize>()) } as *mut usize;
-        assert!(!len.is_null());
+        debug_assert!(!len.is_null());
         unsafe {
             len.write(0);
         }
@@ -159,7 +159,7 @@ impl ErasedVec {
     #[inline]
     fn set_len(&self, new_len: usize) {
         unsafe {
-            assert!(new_len * self.layout.size() <= (&*self.data.get()).capacity());
+            debug_assert!(new_len * self.layout.size() <= (&*self.data.get()).capacity());
             (&mut *self.data.get()).set_len(new_len * self.layout.size());
             *self.len = new_len;
         }
@@ -179,20 +179,20 @@ impl ErasedVec {
 
     #[inline]
     pub fn get<T>(&self, idx: usize) -> &T {
-        assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &*self.get_ptr(idx) }
     }
 
     #[inline]
     pub fn get_mut<T>(&self, idx: usize) -> &mut T {
-        assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &mut *self.get_mut_ptr(idx) }
     }
 
     #[inline]
     pub fn insert<T>(&mut self, idx: usize, item: T) {
-        assert_eq!(self.layout, Layout::new::<T>());
-        assert!(idx <= self.len());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert!(idx <= self.len());
         self.reserve(1);
         unsafe {
             let ptr = self.get_mut_ptr::<T>(idx);
@@ -206,7 +206,7 @@ impl ErasedVec {
 
     #[inline]
     pub fn push<T>(&mut self, item: T) {
-        assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
         self.reserve(1);
         unsafe {
             let ptr = self.get_mut_ptr::<T>(self.len());
@@ -217,7 +217,7 @@ impl ErasedVec {
 
     #[inline]
     pub fn push_erased(&mut self, mut item: ErasedBox) {
-        assert_eq!(self.layout, item.layout);
+        debug_assert_eq!(self.layout, item.layout);
         self.reserve(1);
         let size = self.layout.size();
         unsafe {
@@ -230,8 +230,8 @@ impl ErasedVec {
 
     #[inline]
     pub fn swap_remove<T>(&mut self, idx: usize) -> T {
-        assert_eq!(self.layout, Layout::new::<T>());
-        assert!(idx < self.len());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert!(idx < self.len());
         unsafe {
             let ptr = self.get_mut_ptr::<T>(idx);
             let value = ptr.read();
@@ -243,7 +243,7 @@ impl ErasedVec {
 
     #[inline]
     pub fn swap_remove_and_drop(&mut self, idx: usize) {
-        assert!(idx < self.len());
+        debug_assert!(idx < self.len());
         let last = self.len() - 1;
         let size = self.layout.size();
         unsafe {
@@ -261,8 +261,8 @@ impl ErasedVec {
 
     #[inline]
     pub fn remove<T>(&mut self, idx: usize) -> T {
-        assert_eq!(self.layout, Layout::new::<T>());
-        assert!(idx < self.len());
+        debug_assert_eq!(self.layout, Layout::new::<T>());
+        debug_assert!(idx < self.len());
         unsafe {
             let ptr = self.get_mut_ptr::<T>(idx);
             let value = ptr.read();

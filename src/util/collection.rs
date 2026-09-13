@@ -251,19 +251,19 @@ impl<T: Clone + Default> Volume<T> {
     #[inline]
     pub fn part(&self, min: U8Vec3, size: U8Vec3) -> Volume<T> {
         let max = min + size;
-        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
+        debug_assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
 
-        let [w, h, _] = self.size.as_usizevec3().to_array();
+        let [_, h, d] = self.size.as_usizevec3().to_array();
         let [sw, sh, sd] = size.as_usizevec3().to_array();
         let [dx, dy, dz] = min.as_usizevec3().to_array();
 
         let mut part = Volume::<T>::new(size);
 
-        for z in 0..sd {
+        for x in 0..sw {
             for y in 0..sh {
-                let dst = z * sh * sw + y * sw;
-                let src = (z + dz) * h * w + (y + dy) * w + dx;
-                part.vec[dst..dst + sw].clone_from_slice(&self.vec[src..src + sw]);
+                let dst = x * sh * sd + y * sd;
+                let src = (x + dx) * h * d + (y + dy) * d + dz;
+                part.vec[dst..dst + sd].clone_from_slice(&self.vec[src..src + sd]);
             }
         }
 
@@ -282,17 +282,17 @@ impl<T: Clone> Volume<T> {
 
     #[inline]
     pub fn fill(&mut self, min: U8Vec3, max: U8Vec3, value: T) {
-        assert!(min.x < self.size.x && min.y < self.size.y && min.z < self.size.z);
-        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
+        debug_assert!(min.x < self.size.x && min.y < self.size.y && min.z < self.size.z);
+        debug_assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
 
-        let [w, h, _] = self.size.as_usizevec3().to_array();
+        let [_, h, d] = self.size.as_usizevec3().to_array();
         let min = USizeVec3::from(min);
         let max = USizeVec3::from(max);
 
-        for z in min.z..max.z {
+        for x in min.x..max.x {
             for y in min.y..max.y {
-                let offset = z * h * w + y * w;
-                self.vec[offset + min.x..offset + max.x].fill(value.clone());
+                let offset = x * h * d + y * d;
+                self.vec[offset + min.z..offset + max.z].fill(value.clone());
             }
         }
     }
@@ -300,17 +300,17 @@ impl<T: Clone> Volume<T> {
     #[inline]
     pub fn fit(&mut self, min: U8Vec3, part: &Volume<T>) {
         let max = min + part.size;
-        assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
+        debug_assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
 
-        let [w, h, _] = self.size.as_usizevec3().to_array();
+        let [_, h, d] = self.size.as_usizevec3().to_array();
         let [sw, sh, sd] = part.size.as_usizevec3().to_array();
         let [dx, dy, dz] = min.as_usizevec3().to_array();
 
-        for z in 0..sd {
+        for x in 0..sw {
             for y in 0..sh {
-                let src = z * sh * sw + y * sw;
-                let dst = (z + dz) * h * w + (y + dy) * w + dx;
-                self.vec[dst..dst + sw].clone_from_slice(&part.vec[src..src + sw]);
+                let src = x * sh * sd + y * sd;
+                let dst = (x + dx) * h * d + (y + dy) * d + dz;
+                self.vec[dst..dst + sd].clone_from_slice(&part.vec[src..src + sd]);
             }
         }
     }
@@ -323,9 +323,9 @@ impl<T> Volume<T> {
         let vec = (0..total)
             .map(|idx| {
                 let pos = U8Vec3::new(
-                    (idx % w) as u8,
-                    ((idx / w) % h) as u8,
-                    (idx / (w * h)) as u8,
+                    (idx / (h * d)) as u8,
+                    ((idx / d) % h) as u8,
+                    (idx % d) as u8,
                 );
                 pos_to_item(pos)
             })
@@ -336,10 +336,10 @@ impl<T> Volume<T> {
 
     #[inline]
     pub fn idx_of_pos(&self, pos: U8Vec3) -> usize {
-        assert!(pos.x < self.size.x && pos.y < self.size.y && pos.z < self.size.z);
-        let w = self.size.x as usize;
+        debug_assert!(pos.x < self.size.x && pos.y < self.size.y && pos.z < self.size.z);
         let h = self.size.y as usize;
-        pos.x as usize + pos.y as usize * w + pos.z as usize * w * h
+        let d = self.size.z as usize;
+        pos.x as usize * h * d + pos.y as usize * d + pos.z as usize
     }
 
     #[inline]
@@ -357,6 +357,52 @@ impl<T> Volume<T> {
     pub fn set(&mut self, pos: U8Vec3, value: T) -> T {
         let idx = self.idx_of_pos(pos);
         mem::replace(&mut self.vec[idx], value)
+    }
+
+    #[inline]
+    pub fn rows(&self, min: U8Vec3, max: U8Vec3) -> impl Iterator<Item = &[T]> + '_ {
+        debug_assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
+
+        let [_, h, d] = self.size.as_usizevec3().to_array();
+        let [sw, sh, sd] = (max - min).as_usizevec3().to_array();
+        let [ox, oy, oz] = min.as_usizevec3().to_array();
+        let data: &[T] = &self.vec;
+
+        (0..sw).flat_map(move |x| {
+            (0..sh).map(move |y| {
+                let start = (ox + x) * h * d + (oy + y) * d + oz;
+                &data[start..start + sd]
+            })
+        })
+    }
+
+    #[inline]
+    pub fn rows_mut(&mut self, min: U8Vec3, max: U8Vec3) -> impl Iterator<Item = &mut [T]> + '_ {
+        debug_assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
+
+        let [_, h, d] = self.size.as_usizevec3().to_array();
+        let [sw, sh, sd] = (max - min).as_usizevec3().to_array();
+        let [ox, oy, oz] = min.as_usizevec3().to_array();
+        let base = self.vec.as_mut_ptr();
+
+        (0..sw).flat_map(move |x| {
+            (0..sh).map(move |y| {
+                let start = (ox + x) * h * d + (oy + y) * d + oz;
+                unsafe { std::slice::from_raw_parts_mut(base.add(start), sd) }
+            })
+        })
+    }
+
+    pub fn iter(&self, min: U8Vec3, max: U8Vec3) -> impl Iterator<Item = &'_ T> + '_ {
+        self.rows(min, max).flatten()
+    }
+
+    pub fn iter_mut<'a>(
+        &mut self,
+        min: U8Vec3,
+        max: U8Vec3,
+    ) -> impl Iterator<Item = &'_ mut T> + '_ {
+        self.rows_mut(min, max).flatten()
     }
 }
 

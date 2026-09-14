@@ -12,14 +12,14 @@ use std::array;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-pub static BLOCK_MESH_TEMPLATES: LazyLock<Registry<BlockMeshTemplate>> =
+pub static BLOCK_MESH_TEMPLATES: LazyLock<Registry<BlockModelTemplate>> =
     LazyLock::new(|| build_block_mesh_templates());
 
-fn build_block_mesh_templates() -> Registry<BlockMeshTemplate> {
+fn build_block_mesh_templates() -> Registry<BlockModelTemplate> {
     let mut templates = Registry::new();
 
     let [cube_w, cube_e, cube_d, cube_u, cube_n, cube_s] =
-        BlockMeshTemplate::cuboid(Vec3::ZERO, Vec3::ONE, [false; 6]);
+        BlockModelTemplate::cuboid(Vec3::ZERO, Vec3::ONE, [false; 6]);
 
     templates.register(0, cube_w);
     templates.register(1, cube_e);
@@ -61,17 +61,17 @@ resources! {
 
 #[derive(Default)]
 pub struct BlockModel {
-    meshes: Vec<TemplatedMesh>,
+    meshes: Vec<BlockModelPart>,
     cull: [bool; 6],
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
-pub struct TemplatedMesh {
+pub struct BlockModelPart {
     pub template: Id,
     pub texture: Id,
 }
 
-pub struct BlockMeshTemplate {
+pub struct BlockModelTemplate {
     mesh: Mesh<NormTexVertex>,
     translucent: bool,
     cull: Option<Direction>,
@@ -84,7 +84,7 @@ pub struct MergeSpan {
     uv_unit: Vec2,
 }
 
-impl BlockMeshTemplate {
+impl BlockModelTemplate {
     pub fn cuboid(min: Vec3, max: Vec3, translucent: [bool; 6]) -> [Self; 6] {
         let uvs = Direction::ALL.map(|dir| {
             let (udir, vdir) = match dir {
@@ -172,7 +172,7 @@ impl BlockMeshTemplate {
 }
 
 impl BlockModel {
-    pub fn new(meshes: Vec<TemplatedMesh>) -> Self {
+    pub fn new(meshes: Vec<BlockModelPart>) -> Self {
         let mut cull = [false; 6];
 
         for mesh in meshes.iter() {

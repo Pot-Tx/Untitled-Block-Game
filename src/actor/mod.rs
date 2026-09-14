@@ -5,7 +5,7 @@ use crate::ecs::*;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3};
-use crate::world::{BlockPos, World};
+use crate::world::{BlockPos, Gravity, World};
 pub use control::*;
 use glam::{Vec2, Vec3};
 use std::f32::consts::FRAC_PI_2;
@@ -23,8 +23,9 @@ fn build_actor_types() -> Registry<ActorType> {
                 .with(PrevPos(Vec3::splat(16.0)))
                 .with(Rotation(Vec3::ZERO))
                 .with(Velocity(Vec3::ZERO))
-                .with(Speed(0.25))
+                .with(Speed(0.5))
                 .with(PlayerControlled)
+                .with(Flight)
         },
     };
     let survivor = ActorType {
@@ -40,6 +41,7 @@ fn build_actor_types() -> Registry<ActorType> {
                     min: Vec3::new(-0.25, -1.25, -0.25),
                     max: Vec3::new(0.25, 0.25, 0.25),
                 }))
+                .with(Contact([None; 3]))
                 .with(Option::<Selection>::None)
         },
     };
@@ -67,6 +69,8 @@ components! {
     pub struct Omega(Vec3): Hot;
     pub struct Speed(f32): Hot;
     pub struct Bound(AABB<Vec3>): Hot;
+    pub struct Contact([Option<bool>; 3]): Hot;
+    pub struct Flight: Cold;
 
     pub struct PrevPos(Vec3): Cold;
 }
@@ -101,12 +105,12 @@ impl Velocity {
     #[inline]
     pub fn accelerate(&mut self, rot: &Rotation, spd: &Speed, dir: Vec3) {
         if dir != Vec3::ZERO {
-            let vector = dir.normalize() * spd.0;
+            let motion = dir.normalize() * spd.0;
             let yaw = rot.0[0];
             self.0 += Vec3::new(
-                vector.z * yaw.sin() + vector.x * yaw.cos(),
-                vector.y,
-                -vector.z * yaw.cos() + vector.x * yaw.sin(),
+                motion.z * yaw.sin() + motion.x * yaw.cos(),
+                motion.y,
+                -motion.z * yaw.cos() + motion.x * yaw.sin(),
             );
         }
     }
@@ -120,6 +124,8 @@ impl Bound {
 }
 
 pub struct Stalker;
+
+pub struct Gravitator;
 
 pub struct Translator;
 
@@ -142,6 +148,21 @@ impl System for Stalker {
     }
 }
 
+impl System for Gravitator {
+    type CompQuery = (CompWrite<Velocity>, Without<Flight>);
+    type ResQuery = ResRead<Gravity>;
+
+    fn operate(
+        &mut self,
+        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
+    ) -> Option<Vec<Command>> {
+        entry.1.0.y -= res.0;
+
+        None
+    }
+}
+
 impl System for Translator {
     type CompQuery = (CompWrite<Position>, CompRead<Velocity>, Without<Bound>);
     type ResQuery = ();
@@ -158,12 +179,17 @@ impl System for Translator {
 }
 
 impl System for Collider {
-    type CompQuery = (CompWrite<Position>, CompWrite<Velocity>, CompRead<Bound>);
+    type CompQuery = (
+        CompWrite<Position>,
+        CompWrite<Velocity>,
+        CompRead<Bound>,
+        OptionalWrite<Contact>,
+    );
     type ResQuery = ResRead<World>;
 
     fn operate(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
+        mut entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         for &axis in Axis::ALL {
@@ -226,12 +252,15 @@ impl System for Collider {
             }
 
             if depth > 0.0 {
-                if vel > 0.0 {
-                    depth = -depth;
-                }
-
-                entry.1.0 = entry.1.0.shift(axis, depth);
+                entry.1.0 = entry
+                    .1
+                    .0
+                    .shift(axis, if vel < 0.0 { depth } else { -depth });
                 entry.2.0 = entry.2.0.with(axis, 0.0);
+            }
+
+            if let Some(contact) = entry.4.as_deref_mut() {
+                contact.0[axis.idx()] = if depth > 0.0 { Some(vel > 0.0) } else { None }
             }
         }
 
@@ -240,7 +269,7 @@ impl System for Collider {
 }
 
 impl System for Friction {
-    type CompQuery = CompWrite<Velocity>;
+    type CompQuery = (CompWrite<Velocity>, OptionalRead<Contact>);
     type ResQuery = ();
 
     fn operate(
@@ -248,7 +277,13 @@ impl System for Friction {
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         _: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        entry.1.0 *= 0.5;
+        entry.1.0 *= 0.9375;
+
+        if let Some(contact) = entry.2 {
+            if contact.0[Axis::Y.idx()].is_some() {
+                entry.1.0 *= 0.25;
+            }
+        }
 
         None
     }

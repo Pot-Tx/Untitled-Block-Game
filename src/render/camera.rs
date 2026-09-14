@@ -1,4 +1,4 @@
-use crate::actor::{PlayerControlled, Position, Rotation, Velocity};
+use crate::actor::{PlayerControlled, Position, PrevPos, Rotation};
 use crate::ecs::*;
 use crate::render::*;
 use crate::util::bounding::Plane;
@@ -54,10 +54,10 @@ impl Camera {
         canvas: &Canvas,
         pos: &Position,
         rot: &Rotation,
-        vel: &Velocity,
+        prev_pos: &PrevPos,
         partial_tick: &PartialTick,
     ) {
-        let pos = pos.0 - vel.0 * (1.0 - partial_tick.0);
+        let pos = prev_pos.0 + (pos.0 - prev_pos.0) * partial_tick.0;
         let rot = rot.0;
         let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
 
@@ -159,7 +159,7 @@ impl System for CameraTransformer {
         CompRead<PlayerControlled>,
         CompRead<Position>,
         CompRead<Rotation>,
-        CompRead<Velocity>,
+        CompRead<PrevPos>,
     );
     type ResQuery = (ResRead<Canvas>, ResWrite<Camera>, ResRead<PartialTick>);
 

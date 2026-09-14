@@ -112,6 +112,8 @@ impl System for PlayerController {
         CompWrite<Velocity>,
         CompRead<Rotation>,
         CompRead<Speed>,
+        OptionalRead<Flight>,
+        OptionalRead<Contact>,
     );
     type ResQuery = ResRead<InputState>;
 
@@ -139,15 +141,34 @@ impl System for PlayerController {
                 dir.x += 1.0;
             }
 
-            if res.is_action_present(5) {
-                dir.y += 1.0;
+            let mut speed = entry.4.0;
+            match entry.5 {
+                None => {
+                    if let Some(contact) = entry.6 {
+                        if let Some(p) = contact.0[Axis::Y.idx()]
+                            && !p
+                        {
+                            if res.is_action_present(5) {
+                                entry.2.0.y = 0.75;
+                            }
+                        } else {
+                            speed *= 0.0625;
+                        }
+                    }
+                }
+
+                Some(_) => {
+                    if res.is_action_present(5) {
+                        dir.y += 1.0;
+                    }
+
+                    if res.is_action_present(6) {
+                        dir.y -= 1.0;
+                    }
+                }
             }
 
-            if res.is_action_present(6) {
-                dir.y -= 1.0;
-            }
-
-            entry.2.accelerate(entry.3, entry.4, dir);
+            entry.2.accelerate(entry.3, &Speed(speed), dir);
         }
 
         None

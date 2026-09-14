@@ -127,6 +127,10 @@ pub struct World {
     meshing_tx: Sender<MeshingTask>,
 }
 
+resources! {
+    pub struct Gravity(f32);
+}
+
 impl Resource for World {}
 
 impl World {

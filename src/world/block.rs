@@ -2,7 +2,7 @@ use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
 use crate::world::model::BlockModel;
-use crate::world::{BlockPos, TemplatedMesh};
+use crate::world::{BlockPos, BlockModelPart};
 use glam::Vec3;
 use std::fmt;
 use std::fmt::Debug;
@@ -23,27 +23,27 @@ fn build_block_types() -> Registry<BlockType> {
 
     let bricks = BlockType {
         models: vec![BlockModel::new(vec![
-            TemplatedMesh {
+            BlockModelPart {
                 template: 0,
                 texture: 1,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 1,
                 texture: 1,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 2,
                 texture: 1,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 3,
                 texture: 1,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 4,
                 texture: 1,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 5,
                 texture: 1,
             },
@@ -60,27 +60,27 @@ fn build_block_types() -> Registry<BlockType> {
 
     let dirt = BlockType {
         models: vec![BlockModel::new(vec![
-            TemplatedMesh {
+            BlockModelPart {
                 template: 0,
                 texture: 2,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 1,
                 texture: 2,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 2,
                 texture: 2,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 3,
                 texture: 2,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 4,
                 texture: 2,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 5,
                 texture: 2,
             },
@@ -97,27 +97,27 @@ fn build_block_types() -> Registry<BlockType> {
 
     let grass = BlockType {
         models: vec![BlockModel::new(vec![
-            TemplatedMesh {
+            BlockModelPart {
                 template: 0,
                 texture: 4,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 1,
                 texture: 4,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 2,
                 texture: 2,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 3,
                 texture: 4,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 4,
                 texture: 4,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 5,
                 texture: 4,
             },
@@ -134,27 +134,27 @@ fn build_block_types() -> Registry<BlockType> {
 
     let log = BlockType {
         models: vec![BlockModel::new(vec![
-            TemplatedMesh {
+            BlockModelPart {
                 template: 0,
                 texture: 5,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 1,
                 texture: 5,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 2,
                 texture: 6,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 3,
                 texture: 6,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 4,
                 texture: 5,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 5,
                 texture: 5,
             },
@@ -171,27 +171,27 @@ fn build_block_types() -> Registry<BlockType> {
 
     let leaves = BlockType {
         models: vec![BlockModel::new(vec![
-            TemplatedMesh {
+            BlockModelPart {
                 template: 0,
                 texture: 7,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 1,
                 texture: 7,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 2,
                 texture: 7,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 3,
                 texture: 7,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 4,
                 texture: 7,
             },
-            TemplatedMesh {
+            BlockModelPart {
                 template: 5,
                 texture: 7,
             },

@@ -77,6 +77,16 @@ pub struct CompWrite<C: Component> {
     marker: PhantomData<C>,
 }
 
+pub struct OptionalRead<C: Component> {
+    comp: *const ErasedComponent,
+    marker: PhantomData<C>,
+}
+
+pub struct OptionalWrite<C: Component> {
+    comp: *const ErasedComponent,
+    marker: PhantomData<C>,
+}
+
 pub struct Without<C: Component> {
     comp: *const ErasedComponent,
     marker: PhantomData<C>,
@@ -129,6 +139,52 @@ impl<C: Component> CompFetch for CompWrite<C> {
 
     fn iter(components: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         components.get::<C>().iter_mut()
+    }
+}
+
+impl<C: Component> CompFetch for OptionalRead<C> {
+    type Item<'a> = Option<&'a C>;
+
+    fn add_to(access: &mut Access) {
+        access.read.insert(TypeId::of::<C>());
+    }
+
+    fn new(components: &ComponentManager) -> Self {
+        Self {
+            comp: components.get::<C>(),
+            marker: PhantomData,
+        }
+    }
+
+    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+        unsafe { Some((&*self.comp).get::<C>(entity)) }
+    }
+
+    fn iter(_: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+        iter::empty()
+    }
+}
+
+impl<C: Component> CompFetch for OptionalWrite<C> {
+    type Item<'a> = Option<&'a mut C>;
+
+    fn add_to(access: &mut Access) {
+        access.write.insert(TypeId::of::<C>());
+    }
+
+    fn new(components: &ComponentManager) -> Self {
+        Self {
+            comp: components.get::<C>(),
+            marker: PhantomData,
+        }
+    }
+
+    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+        unsafe { Some((&*self.comp).get_mut::<C>(entity)) }
+    }
+
+    fn iter(_: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+        iter::empty()
     }
 }
 
@@ -424,6 +480,84 @@ impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch, V: ResFetch> ResQuery f
             T::get(resources),
             U::get(resources),
             V::get(resources),
+        ));
+    }
+}
+
+impl<C: CompFetch, D: CompFetch, E: CompFetch, G: CompFetch, H: CompFetch, J: CompFetch> CompQuery
+    for (C, D, E, G, H, J)
+{
+    type Item<'a> = (
+        Id,
+        C::Item<'a>,
+        D::Item<'a>,
+        E::Item<'a>,
+        G::Item<'a>,
+        H::Item<'a>,
+        J::Item<'a>,
+    );
+
+    fn access() -> Access {
+        let mut access = Access::new();
+        C::add_to(&mut access);
+        D::add_to(&mut access);
+        E::add_to(&mut access);
+        G::add_to(&mut access);
+        H::add_to(&mut access);
+        J::add_to(&mut access);
+        access
+    }
+
+    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
+        let d = D::new(components);
+        let e = E::new(components);
+        let g = G::new(components);
+        let h = H::new(components);
+        let j = J::new(components);
+        for (i, c) in C::iter(components) {
+            if let Some(d) = d.get(i)
+                && let Some(e) = e.get(i)
+                && let Some(g) = g.get(i)
+                && let Some(h) = h.get(i)
+                && let Some(j) = j.get(i)
+            {
+                f((i, c, d, e, g, h, j));
+            }
+        }
+    }
+}
+
+impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch, V: ResFetch, W: ResFetch> ResQuery
+    for (R, S, T, U, V, W)
+{
+    type Item<'a> = (
+        R::Item<'a>,
+        S::Item<'a>,
+        T::Item<'a>,
+        U::Item<'a>,
+        V::Item<'a>,
+        W::Item<'a>,
+    );
+
+    fn access() -> Access {
+        let mut access = Access::new();
+        R::add_to(&mut access);
+        S::add_to(&mut access);
+        T::add_to(&mut access);
+        U::add_to(&mut access);
+        V::add_to(&mut access);
+        W::add_to(&mut access);
+        access
+    }
+
+    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
+        f((
+            R::get(resources),
+            S::get(resources),
+            T::get(resources),
+            U::get(resources),
+            V::get(resources),
+            W::get(resources),
         ));
     }
 }

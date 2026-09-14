@@ -136,10 +136,13 @@ impl GameClient {
         simulation.components.register::<Speed>();
         simulation.components.register::<PlayerControlled>();
         simulation.components.register::<Bound>();
+        simulation.components.register::<Contact>();
+        simulation.components.register::<Flight>();
         simulation.components.register::<Option<Selection>>();
 
         simulation.systems.register(0, PlayerController);
         simulation.systems.register(1, Stalker);
+        simulation.systems.register(1, Gravitator);
         simulation.systems.register(2, Translator);
         simulation.systems.register(3, Collider);
         simulation.systems.register(4, Friction);
@@ -235,6 +238,7 @@ impl GameClient {
         simulation.resources.register(ChunkMesher::new(meshing_rx));
         simulation.resources.register::<Option<Frame>>(None);
         simulation.resources.register(PartialTick(0.0));
+        simulation.resources.register(Gravity(0.125));
 
         let mut render_systems = SystemManager::new();
 

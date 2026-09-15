@@ -337,7 +337,7 @@ impl World {
         for pos in self.changed_regions.drain() {
             if let Some(region) = self.regions.get_mut(pos) {
                 if let Err(e) = region.save() {
-                    error!("Failed to save Region {}: {}", pos, e);
+                    error!("failed to save region {}: {}", pos, e);
                 }
             }
         }

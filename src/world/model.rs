@@ -1,5 +1,5 @@
 use crate::ecs::*;
-use crate::render::{AlphaVertex, BindSet, Mesh, MeshGroup, NormTexVertex, Tex};
+use crate::render::{AlphaVertex, BindSet, Mesh, MeshGroup, NormTexVertex, NormUvVertex, Tex};
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3, Direction, ICoord3};
 use crate::util::Id;
@@ -8,58 +8,25 @@ use crossbeam_channel::{Receiver, Sender};
 use glam::{U8Vec3, Vec2, Vec3};
 use log::error;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::array;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-pub static BLOCK_MESH_TEMPLATES: LazyLock<Registry<BlockModelTemplate>> =
-    LazyLock::new(|| build_block_mesh_templates());
+pub static BLOCK_MODEL_TEMPLATES: LazyLock<Registry<BlockModelTemplate>> = LazyLock::new(|| {
+    Registry::load_rons_from("assets/models/block/templates")
+        .expect("failed to load block model templates")
+});
 
-fn build_block_mesh_templates() -> Registry<BlockModelTemplate> {
-    let mut templates = Registry::new();
-
-    let [cube_w, cube_e, cube_d, cube_u, cube_n, cube_s] =
-        BlockModelTemplate::cuboid(Vec3::ZERO, Vec3::ONE, [false; 6]);
-
-    templates.register(0, cube_w);
-    templates.register(1, cube_e);
-    templates.register(2, cube_d);
-    templates.register(3, cube_u);
-    templates.register(4, cube_n);
-    templates.register(5, cube_s);
-
-    templates
-}
-
-pub fn create_block_textures() -> Registry<Tex> {
-    let mut textures = Registry::new();
-
-    let missing = Tex::from_png("missing").expect("Failed to load Textures");
-    let bricks = Tex::from_png("bricks").unwrap_or(missing.clone());
-    let dirt = Tex::from_png("dirt").unwrap_or(missing.clone());
-    let grass_side = Tex::from_png("grass_side").unwrap_or(missing.clone());
-    let grass_top = Tex::from_png("grass_top").unwrap_or(missing.clone());
-    let log_side = Tex::from_png("log_side").unwrap_or(missing.clone());
-    let log_top = Tex::from_png("log_top").unwrap_or(missing.clone());
-    let leaves = Tex::from_png("leaves").unwrap_or(missing.clone());
-
-    textures.register(0, missing);
-    textures.register(1, bricks);
-    textures.register(2, dirt);
-    textures.register(3, grass_side);
-    textures.register(4, grass_top);
-    textures.register(5, log_side);
-    textures.register(6, log_top);
-    textures.register(7, leaves);
-
-    textures
-}
+pub static BLOCK_TEXTURES: LazyLock<Registry<Tex>> = LazyLock::new(|| {
+    Registry::<Tex>::load_from("assets/textures/block").expect("failed to load block textures")
+});
 
 resources! {
     pub struct BlockTextures(BindSet<TextureArraySampler>);
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct BlockModel {
     meshes: Vec<BlockModelPart>,
     cull: [bool; 6],
@@ -71,17 +38,59 @@ pub struct BlockModelPart {
     pub texture: Id,
 }
 
+#[derive(Serialize, Deserialize)]
+struct RawBlockModelPart<'a> {
+    template: &'a str,
+    texture: &'a str,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct BlockModelTemplate {
-    mesh: Mesh<NormTexVertex>,
+    mesh: Mesh<NormUvVertex>,
     translucent: bool,
     cull: Option<Direction>,
     spans: SmallVec<[MergeSpan; 2]>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct MergeSpan {
     axis: Axis,
     ends: Vec<usize>,
     uv_unit: Vec2,
+}
+
+impl Serialize for BlockModel {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.meshes.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockModel {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let meshes = Vec::<BlockModelPart>::deserialize(deserializer)?;
+        Ok(Self::new(meshes))
+    }
+}
+
+impl Serialize for BlockModelPart {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let raw = RawBlockModelPart {
+            template: BLOCK_MODEL_TEMPLATES.name_of(self.template),
+            texture: BLOCK_TEXTURES.name_of(self.texture),
+        };
+        raw.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for BlockModelPart {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawBlockModelPart::deserialize(deserializer)?;
+        Ok(Self {
+            template: BLOCK_MODEL_TEMPLATES.id_of(raw.template),
+            texture: BLOCK_TEXTURES.id_of(raw.texture),
+        })
+    }
 }
 
 impl BlockModelTemplate {
@@ -116,7 +125,7 @@ impl BlockModelTemplate {
         let mut merge_axis = Axis::ALL.to_vec();
         merge_axis.retain(|&a| min.get(a) < 0.001 && max.get(a) > 0.999);
 
-        let cuboid = Mesh::<NormTexVertex>::cuboid(min, max, [0; 6], uvs);
+        let cuboid = Mesh::<NormUvVertex>::cuboid(min, max, uvs);
 
         array::from_fn(|i| {
             let dir = Direction::by_idx(i);
@@ -176,7 +185,7 @@ impl BlockModel {
         let mut cull = [false; 6];
 
         for mesh in meshes.iter() {
-            let template = BLOCK_MESH_TEMPLATES.get(mesh.template);
+            let template = BLOCK_MODEL_TEMPLATES.get(mesh.template);
             if let Some(dir) = template.cull {
                 cull[dir.idx()] = true;
             }
@@ -277,7 +286,7 @@ impl ChunkMesher {
         };
 
         if task.tx.try_send(result).is_err() {
-            error!("Failed to send Meshes to Region");
+            error!("failed to send meshes to region");
         }
     }
 
@@ -296,7 +305,7 @@ impl ChunkMesher {
                     let block = Block::from_meta(*chunk.get(real_pos));
 
                     for temp_mesh in block.model().meshes.iter() {
-                        let template = BLOCK_MESH_TEMPLATES.get(temp_mesh.template);
+                        let template = BLOCK_MODEL_TEMPLATES.get(temp_mesh.template);
 
                         if let Some(dir) = template.cull {
                             let adj_pos = real_pos.step(dir);
@@ -379,7 +388,7 @@ impl ChunkMesher {
         let merged = temp_mergers
             .into_par_iter()
             .map(|(temp_mesh, merger)| {
-                let template = BLOCK_MESH_TEMPLATES.get(temp_mesh.template);
+                let template = BLOCK_MODEL_TEMPLATES.get(temp_mesh.template);
                 let base = template.mesh.with_texture(temp_mesh.texture);
 
                 merger

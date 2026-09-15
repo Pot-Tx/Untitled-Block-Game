@@ -110,7 +110,9 @@ impl<T> Deref for OnceInit<T> {
 
     #[inline]
     fn deref(&self) -> &Self::Target {
-        self.inner.get().expect("OnceInit hasn't been initialized")
+        self.inner
+            .get()
+            .expect("OnceInit should be initialized before dereferenced")
     }
 }
 

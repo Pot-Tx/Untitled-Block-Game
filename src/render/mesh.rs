@@ -4,6 +4,7 @@ use crate::render::{BufferConfig, BufferInit, FromConfig};
 use crate::util::coord::*;
 use crate::util::Id;
 use glam::*;
+use serde::{Deserialize, Serialize};
 use std::array;
 use std::marker::PhantomData;
 use wgpu::*;
@@ -35,7 +36,8 @@ pub struct RenderItem<'a, V: Vertex, I: Inst> {
     pub instances: &'a Instances<I>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(bound(deserialize = ""))]
 pub struct Mesh<V: Vertex> {
     pub vertices: Vec<V>,
     pub indices: Vec<u16>,
@@ -233,6 +235,13 @@ impl Mesh<BasicVertex> {
         }
     }
 
+    pub fn with_normal(&self, norm: Vec3) -> Mesh<NormVertex> {
+        Mesh {
+            vertices: self.vertices.iter().map(|v| v.with_normal(norm)).collect(),
+            indices: self.indices.clone(),
+        }
+    }
+
     pub fn with_texture(&self, tex: Id, uvs: Vec<Vec2>) -> Mesh<TexVertex> {
         Mesh {
             vertices: self
@@ -246,22 +255,48 @@ impl Mesh<BasicVertex> {
     }
 }
 
+impl Mesh<NormVertex> {
+    pub fn cuboid(min: Vec3, max: Vec3) -> [Self; 6] {
+        let cuboid = Mesh::<BasicVertex>::cuboid(min, max);
+        array::from_fn(|i| cuboid[i].with_normal(Direction::by_idx(i).vector()))
+    }
+
+    pub fn with_uv(&self, uvs: Vec<Vec2>) -> Mesh<NormUvVertex> {
+        Mesh {
+            vertices: self
+                .vertices
+                .iter()
+                .zip(uvs.into_iter())
+                .map(|(m, uv)| m.with_uv(uv))
+                .collect(),
+            indices: self.indices.clone(),
+        }
+    }
+}
+
 impl Mesh<TexVertex> {
     pub fn cuboid(min: Vec3, max: Vec3, texs: [Id; 6], uvs: [Vec<Vec2>; 6]) -> [Self; 6] {
         let cuboid = Mesh::<BasicVertex>::cuboid(min, max);
         array::from_fn(|i| cuboid[i].with_texture(texs[i], uvs[i].clone()))
     }
 
-    pub fn with_texture(&self, tex: Id) -> Self {
-        Mesh {
-            vertices: self.vertices.iter().map(|v| v.with_texture(tex)).collect(),
-            indices: self.indices.clone(),
-        }
-    }
-
     pub fn with_normal(&self, norm: Vec3) -> Mesh<NormTexVertex> {
         Mesh {
             vertices: self.vertices.iter().map(|m| m.with_normal(norm)).collect(),
+            indices: self.indices.clone(),
+        }
+    }
+}
+
+impl Mesh<NormUvVertex> {
+    pub fn cuboid(min: Vec3, max: Vec3, uvs: [Vec<Vec2>; 6]) -> [Self; 6] {
+        let cuboid = Mesh::<NormVertex>::cuboid(min, max);
+        array::from_fn(|i| cuboid[i].with_uv(uvs[i].clone()))
+    }
+
+    pub fn with_texture(&self, tex: Id) -> Mesh<NormTexVertex> {
+        Mesh {
+            vertices: self.vertices.iter().map(|v| v.with_texture(tex)).collect(),
             indices: self.indices.clone(),
         }
     }

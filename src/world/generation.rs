@@ -92,7 +92,7 @@ impl<T> ArcRingVolume<T> {
         if self.bound.load().is_point_inside(pos) {
             Ok(self.volume.get(self.cast_pos(pos)).load_full())
         } else {
-            Err(anyhow!("Pos out of bound"))
+            Err(anyhow!("position out of bound"))
         }
     }
 
@@ -103,7 +103,7 @@ impl<T> ArcRingVolume<T> {
                 .get(self.cast_pos(pos))
                 .swap(Some(Arc::new(value))))
         } else {
-            Err(anyhow!("Pos out of bound"))
+            Err(anyhow!("position out of bound"))
         }
     }
 
@@ -394,7 +394,7 @@ impl Generator {
         };
 
         if let Err(e) = task.tx.try_send(result) {
-            error!("Failed to send generation result to Region: {}", e);
+            error!("failed to send generation result to region: {}", e);
         }
     }
 }

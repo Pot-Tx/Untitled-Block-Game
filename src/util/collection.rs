@@ -1,7 +1,13 @@
 use crate::util::Id;
+use anyhow::Result;
+use bimap::BiMap;
 use glam::{U8Vec3, USizeVec3};
 use log::error;
-use std::mem;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::BufReader;
+use std::{fs, mem};
 
 #[derive(Default)]
 pub struct SparseSet {
@@ -407,14 +413,41 @@ impl<T> Volume<T> {
 }
 
 pub struct Registry<T> {
-    pub items: Vec<T>,
+    pub entries: Vec<T>,
+    pub names: BiMap<Id, String>,
 }
 
 impl<T> Default for Registry<T> {
     fn default() -> Self {
         Self {
-            items: Vec::default(),
+            entries: Vec::default(),
+            names: BiMap::default(),
         }
+    }
+}
+
+impl<T: DeserializeOwned> Registry<T> {
+    pub fn load_rons_from(path: &str) -> Result<Self> {
+        let mut new = Self::new();
+
+        let mut id = 0;
+        for entry in fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_file() {
+                let name = path
+                    .file_stem()
+                    .expect("path should have a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                let file = File::open(path)?;
+                let item = ron::de::from_reader(BufReader::new(file))?;
+
+                new.register(id, name, item);
+                id += 1;
+            }
+        }
+
+        Ok(new)
     }
 }
 
@@ -423,28 +456,41 @@ impl<T> Registry<T> {
         Self::default()
     }
 
-    pub fn register(&mut self, id: Id, item: T) {
-        if id == self.items.len() as u32 {
-            self.items.push(item);
+    pub fn register<S>(&mut self, id: Id, name: S, item: T)
+    where
+        String: From<S>,
+    {
+        if id == self.entries.len() as u32 {
+            self.entries.push(item);
+            self.names.insert(id, String::from(name));
         } else {
             error!(
-                "Cannot register item with id {}. Make sure to register in order!",
+                "could not register item with id {}. Make sure to register in order!",
                 id
             );
         }
     }
 
     #[inline]
-    pub fn get(&self, id: Id) -> &T {
-        self.items
-            .get(id as usize)
-            .expect(&format!("Item with id {} hasn't been registered", id))
+    pub fn id_of(&self, name: &str) -> Id {
+        *self
+            .names
+            .get_by_right(name)
+            .expect(&format!("entry with name {} not found", name))
     }
 
     #[inline]
-    pub fn get_mut(&mut self, id: Id) -> &mut T {
-        self.items
-            .get_mut(id as usize)
-            .expect(&format!("Item with id {} hasn't been registered", id))
+    pub fn name_of(&self, id: Id) -> &str {
+        self.names
+            .get_by_left(&id)
+            .expect(&format!("entry with id {} not found", id))
+            .as_str()
+    }
+
+    #[inline]
+    pub fn get(&self, id: Id) -> &T {
+        self.entries
+            .get(id as usize)
+            .expect(&format!("entry with id {} not found", id))
     }
 }

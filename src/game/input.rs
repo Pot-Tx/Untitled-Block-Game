@@ -54,15 +54,15 @@ fn build_input_map() -> Registry<Input> {
         input_type: InputType::JustPressed,
     };
 
-    input_map.register(0, escape);
-    input_map.register(1, forward);
-    input_map.register(2, left);
-    input_map.register(3, backward);
-    input_map.register(4, right);
-    input_map.register(5, ascend);
-    input_map.register(6, descend);
-    input_map.register(7, attack);
-    input_map.register(8, interact);
+    input_map.register(0, "escape", escape);
+    input_map.register(1, "forward", forward);
+    input_map.register(2, "left", left);
+    input_map.register(3, "backward", backward);
+    input_map.register(4, "right", right);
+    input_map.register(5, "ascend", ascend);
+    input_map.register(6, "descend", descend);
+    input_map.register(7, "attack", attack);
+    input_map.register(8, "interact", interact);
 
     input_map
 }
@@ -224,15 +224,15 @@ impl System for Escaper {
                 let height = WINDOW.inner_size().height;
                 WINDOW
                     .set_cursor_position(PhysicalPosition::new(width / 2, height / 2))
-                    .expect("Failed to center cursor");
+                    .expect("failed to center cursor");
                 WINDOW
                     .set_cursor_grab(CursorGrabMode::Locked)
-                    .expect("Failed to grab cursor");
+                    .expect("failed to grab cursor");
                 WINDOW.set_cursor_visible(false);
             } else {
                 WINDOW
                     .set_cursor_grab(CursorGrabMode::None)
-                    .expect("Failed to grab cursor");
+                    .expect("failed to grab cursor");
                 WINDOW.set_cursor_visible(true);
             }
         }

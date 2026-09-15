@@ -39,7 +39,7 @@ impl ResourceManager {
         let id = TypeId::of::<R>();
         self.resources
             .get(&id)
-            .expect(&format!("Resource with id {:?} not found", id))
+            .expect(&format!("resource with id {:?} not found", id))
             .cast()
     }
 
@@ -47,7 +47,7 @@ impl ResourceManager {
         let id = TypeId::of::<R>();
         self.resources
             .get(&id)
-            .expect(&format!("Resource with id {:?} not found", id))
+            .expect(&format!("resource with id {:?} not found", id))
             .cast_mut()
     }
 }

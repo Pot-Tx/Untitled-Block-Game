@@ -2,7 +2,7 @@ use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
 use crate::world::model::BlockModel;
-use crate::world::{BlockPos, BlockModelPart};
+use crate::world::BlockPos;
 use glam::Vec3;
 use std::fmt;
 use std::fmt::Debug;
@@ -11,6 +11,8 @@ pub static BLOCK_TYPES: LazyLock<Registry<BlockType>> = LazyLock::new(|| build_b
 
 fn build_block_types() -> Registry<BlockType> {
     let mut block_types = Registry::new();
+    let models = Registry::<BlockModel>::load_rons_from("assets/models/block")
+        .expect("failed to load block models");
 
     let air = BlockType {
         models: vec![BlockModel::empty()],
@@ -22,32 +24,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let bricks = BlockType {
-        models: vec![BlockModel::new(vec![
-            BlockModelPart {
-                template: 0,
-                texture: 1,
-            },
-            BlockModelPart {
-                template: 1,
-                texture: 1,
-            },
-            BlockModelPart {
-                template: 2,
-                texture: 1,
-            },
-            BlockModelPart {
-                template: 3,
-                texture: 1,
-            },
-            BlockModelPart {
-                template: 4,
-                texture: 1,
-            },
-            BlockModelPart {
-                template: 5,
-                texture: 1,
-            },
-        ])],
+        models: vec![models.get(models.id_of("bricks")).clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -59,32 +36,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let dirt = BlockType {
-        models: vec![BlockModel::new(vec![
-            BlockModelPart {
-                template: 0,
-                texture: 2,
-            },
-            BlockModelPart {
-                template: 1,
-                texture: 2,
-            },
-            BlockModelPart {
-                template: 2,
-                texture: 2,
-            },
-            BlockModelPart {
-                template: 3,
-                texture: 2,
-            },
-            BlockModelPart {
-                template: 4,
-                texture: 2,
-            },
-            BlockModelPart {
-                template: 5,
-                texture: 2,
-            },
-        ])],
+        models: vec![models.get(models.id_of("dirt")).clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -96,32 +48,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let grass = BlockType {
-        models: vec![BlockModel::new(vec![
-            BlockModelPart {
-                template: 0,
-                texture: 4,
-            },
-            BlockModelPart {
-                template: 1,
-                texture: 4,
-            },
-            BlockModelPart {
-                template: 2,
-                texture: 2,
-            },
-            BlockModelPart {
-                template: 3,
-                texture: 4,
-            },
-            BlockModelPart {
-                template: 4,
-                texture: 4,
-            },
-            BlockModelPart {
-                template: 5,
-                texture: 4,
-            },
-        ])],
+        models: vec![models.get(models.id_of("grass")).clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -133,32 +60,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let log = BlockType {
-        models: vec![BlockModel::new(vec![
-            BlockModelPart {
-                template: 0,
-                texture: 5,
-            },
-            BlockModelPart {
-                template: 1,
-                texture: 5,
-            },
-            BlockModelPart {
-                template: 2,
-                texture: 6,
-            },
-            BlockModelPart {
-                template: 3,
-                texture: 6,
-            },
-            BlockModelPart {
-                template: 4,
-                texture: 5,
-            },
-            BlockModelPart {
-                template: 5,
-                texture: 5,
-            },
-        ])],
+        models: vec![models.get(models.id_of("log")).clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -170,32 +72,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let leaves = BlockType {
-        models: vec![BlockModel::new(vec![
-            BlockModelPart {
-                template: 0,
-                texture: 7,
-            },
-            BlockModelPart {
-                template: 1,
-                texture: 7,
-            },
-            BlockModelPart {
-                template: 2,
-                texture: 7,
-            },
-            BlockModelPart {
-                template: 3,
-                texture: 7,
-            },
-            BlockModelPart {
-                template: 4,
-                texture: 7,
-            },
-            BlockModelPart {
-                template: 5,
-                texture: 7,
-            },
-        ])],
+        models: vec![models.get(models.id_of("leaves")).clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -206,12 +83,12 @@ fn build_block_types() -> Registry<BlockType> {
         default_state: 0,
     };
 
-    block_types.register(0, air);
-    block_types.register(1, bricks);
-    block_types.register(2, dirt);
-    block_types.register(3, grass);
-    block_types.register(4, log);
-    block_types.register(5, leaves);
+    block_types.register(0, "air", air);
+    block_types.register(1, "bricks", bricks);
+    block_types.register(2, "dirt", dirt);
+    block_types.register(3, "grass", grass);
+    block_types.register(4, "log", log);
+    block_types.register(5, "leaves", leaves);
 
     block_types
 }

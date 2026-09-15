@@ -1,0 +1,19 @@
+[(
+    template: "cube_w",
+    texture: "log_side",
+), (
+    template: "cube_e",
+    texture: "log_side",
+), (
+    template: "cube_d",
+    texture: "log_top",
+), (
+    template: "cube_u",
+    texture: "log_top",
+), (
+    template: "cube_n",
+    texture: "log_side",
+), (
+    template: "cube_s",
+    texture: "log_side",
+)]

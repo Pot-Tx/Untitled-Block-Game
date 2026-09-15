@@ -82,14 +82,14 @@ impl ComponentManager {
     pub fn by_id(&self, id: TypeId) -> &ErasedComponent {
         self.components
             .get(&id)
-            .expect(&format!("Component with id {:?} not found", id))
+            .expect(&format!("component with id {:?} not found", id))
     }
 
     #[inline]
     pub fn by_id_mut(&mut self, id: TypeId) -> &mut ErasedComponent {
         self.components
             .get_mut(&id)
-            .expect(&format!("Component with id {:?} not found", id))
+            .expect(&format!("component with id {:?} not found", id))
     }
 
     #[inline]

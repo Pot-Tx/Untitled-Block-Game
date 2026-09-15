@@ -1,15 +1,16 @@
 use crate::ecs::{Command, CompQuery, ResQuery, ResRead, ResWrite, System};
 use crate::render::{
-	BindSet, Canvas, Frame, FromConfig, Geometry, Inst, InstGroup, Instances, Mesh, Render,
-	RenderBatch, RenderBatchConfig, RenderDescriptor, RenderItem, Tex, TextureSampler, Transformation,
-	Vertex, ViewPort, QUAD_INDICES,
+    BindSet, Canvas, Frame, FromConfig, Geometry, Inst, InstGroup, Instances, Mesh, Render,
+    RenderBatch, RenderBatchConfig, RenderDescriptor, RenderItem, Tex, TextureSampler, Transformation,
+    Vertex, ViewPort, QUAD_INDICES,
 };
 use crate::util::OnceInit;
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec3};
+use std::fs::File;
 use wgpu::{
-	BufferAddress, LoadOp, PrimitiveTopology, VertexAttribute, VertexBufferLayout, VertexFormat,
-	VertexStepMode,
+    BufferAddress, LoadOp, PrimitiveTopology, VertexAttribute, VertexBufferLayout, VertexFormat,
+    VertexStepMode,
 };
 
 pub static SPRITE_GEOMETRY: OnceInit<Geometry<()>> = OnceInit::new();
@@ -117,9 +118,11 @@ impl Render<(), Sprite> for CrosshairRenderer {
 
 impl CrosshairRenderer {
     pub fn new(canvas: &Canvas) -> Self {
-        let crosshair = Tex::from_png("crosshair")
-            .expect("Failed to load crosshair Texture")
-            .create_texture_sampler(canvas, "crosshair");
+        let crosshair = Tex::from_png(
+            File::open("assets/textures/crosshair.png").expect("failed to load crosshair texture"),
+        )
+        .expect("failed to load crosshair texture")
+        .create_texture_sampler(canvas, "crosshair");
         let sprite = Sprite {
             pos: Vec3::new(-8.0, -8.0, 0.5),
             rot: 0.0,

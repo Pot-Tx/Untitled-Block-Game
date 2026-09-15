@@ -1,9 +1,13 @@
 use crate::util::coord::Coord;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use wgpu::*;
-pub trait Vertex: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
+pub trait Vertex:
+    Copy + Clone + Sync + Send + Pod + Zeroable + Debug + Serialize + DeserializeOwned
+{
     type Pos: Coord;
     const ATTRIBUTE_COUNT: u32;
     const LAYOUT: Option<VertexBufferLayout<'static>>;
@@ -25,24 +29,24 @@ pub trait Inst: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NoVertex;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct BasicVertex {
     pub pos: Vec3,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NormVertex {
     pub pos: Vec3,
     pub norm: Vec3,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TexVertex {
     pub pos: Vec3,
     pub tex: u32,
@@ -50,7 +54,15 @@ pub struct TexVertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
+pub struct NormUvVertex {
+    pub pos: Vec3,
+    pub uv: Vec2,
+    pub norm: Vec3,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NormTexVertex {
     pub pos: Vec3,
     pub tex: u32,
@@ -59,24 +71,24 @@ pub struct NormTexVertex {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct AlphaVertex {
     pub pos: Vec3,
     pub alpha: f32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NoInst;
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TransInst {
     pub pos: Vec3,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct IntTransInst {
     pub pos: IVec3,
 }
@@ -193,6 +205,14 @@ impl NormVertex {
         }
     }
 
+    pub fn with_uv(&self, uv: Vec2) -> NormUvVertex {
+        NormUvVertex {
+            pos: self.pos,
+            uv,
+            norm: self.norm,
+        }
+    }
+
     pub fn with_texture(&self, tex: u32, uv: Vec2) -> NormTexVertex {
         NormTexVertex {
             pos: self.pos,
@@ -251,6 +271,50 @@ impl TexVertex {
             tex: self.tex,
             uv: self.uv,
             norm,
+        }
+    }
+}
+
+impl Vertex for NormUvVertex {
+    vertex_basics!(Vec3, 3);
+
+    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
+        array_stride: size_of::<Self>() as BufferAddress,
+        step_mode: VertexStepMode::Vertex,
+        attributes: &[
+            VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: VertexFormat::Float32x3,
+            },
+            VertexAttribute {
+                offset: (size_of::<Vec3>()) as BufferAddress,
+                shader_location: 1,
+                format: VertexFormat::Float32x2,
+            },
+            VertexAttribute {
+                offset: (size_of::<Vec3>() + size_of::<Vec2>()) as BufferAddress,
+                shader_location: 2,
+                format: VertexFormat::Float32x3,
+            },
+        ],
+    });
+
+    #[inline]
+    fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
+        self.pos *= scale;
+        self.uv *= scale;
+        self
+    }
+}
+
+impl NormUvVertex {
+    pub fn with_texture(&self, tex: u32) -> NormTexVertex {
+        NormTexVertex {
+            pos: self.pos,
+            tex,
+            uv: self.uv,
+            norm: self.norm,
         }
     }
 }

@@ -2,10 +2,10 @@ use crate::render::*;
 use crate::util::collection::Registry;
 use bytemuck::{Pod, Zeroable};
 use glam::{bool, f32, u32, u8};
-use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io::Read;
+use std::{fmt, fs};
 use wgpu::wgt::TexelCopyTextureInfo as TexelCopyTextureInfoBase;
 use wgpu::*;
 
@@ -35,13 +35,13 @@ impl Debug for Tex {
 }
 
 impl Tex {
-    pub fn from_png(name: &str) -> anyhow::Result<Self> {
-        let mut file = File::open(&format!("assets/textures/{}.png", name))?;
+    pub fn from_png(mut file: File) -> anyhow::Result<Self> {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let image = image::load_from_memory(&bytes)?.into_rgba8();
         let (width, height) = image.dimensions();
         let data = image.into_raw();
+
         Ok(Self {
             width,
             height,
@@ -96,6 +96,29 @@ impl Tex {
 }
 
 impl Registry<Tex> {
+    pub fn load_from(path: &str) -> anyhow::Result<Self> {
+        let mut new = Self::new();
+
+        let mut id = 0;
+        for entry in fs::read_dir(path)? {
+            let path = entry?.path();
+            if path.is_file() {
+                let name = path
+                    .file_stem()
+                    .expect("path should have a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                let file = File::open(path)?;
+                let item = Tex::from_png(file)?;
+
+                new.register(id, name, item);
+                id += 1;
+            }
+        }
+
+        Ok(new)
+    }
+
     pub fn create_texture_sampler<'a>(
         &self,
         canvas: &Canvas,
@@ -103,7 +126,7 @@ impl Registry<Tex> {
     ) -> BindSet<TextureArraySampler> {
         let width = self.get(0).width;
         let height = self.get(0).height;
-        let len = self.items.len() as u32;
+        let len = self.entries.len() as u32;
         let mip_level_count = width.min(height).ilog2() + 1;
 
         let mip_name = &format!("{}_mip", name);
@@ -112,7 +135,7 @@ impl Registry<Tex> {
             canvas,
             &TextureConfig {
                 name: mip_name,
-                texs: self.items.iter().collect(),
+                texs: self.entries.iter().collect(),
                 width,
                 height,
                 mip_level_count,
@@ -124,7 +147,7 @@ impl Registry<Tex> {
             canvas,
             &TextureConfig {
                 name,
-                texs: self.items.iter().collect(),
+                texs: self.entries.iter().collect(),
                 width,
                 height,
                 mip_level_count,

@@ -49,7 +49,7 @@ impl Canvas {
                 apply_limit_buckets: false,
             })
             .await
-            .expect("Failed to find adapter");
+            .expect("failed to find adapter");
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING,
             format: TextureFormat::Rgba8UnormSrgb,
@@ -69,7 +69,7 @@ impl Canvas {
                 ..Default::default()
             })
             .await
-            .expect("Failed to create device");
+            .expect("failed to create device");
         surface.configure(&device, &surface_config);
 
         let depth = device.create_texture(&TextureDescriptor {

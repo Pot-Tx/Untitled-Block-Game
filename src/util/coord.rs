@@ -1,17 +1,18 @@
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use num_traits::*;
+use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::ops::*;
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Axis {
     X,
     Y,
     Z,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq, Debug)]
+#[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Direction {
     West,
     East,

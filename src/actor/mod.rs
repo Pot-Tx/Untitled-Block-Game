@@ -46,8 +46,8 @@ fn build_actor_types() -> Registry<ActorType> {
         },
     };
 
-    actor_types.register(0, spectator);
-    actor_types.register(1, survivor);
+    actor_types.register(0, "spectator", spectator);
+    actor_types.register(1, "survivor", survivor);
 
     actor_types
 }

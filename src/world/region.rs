@@ -310,7 +310,7 @@ impl Region {
 
                 self.changed = Some(false);
             } else {
-                return Err(anyhow!("Chunk does not exist"));
+                return Err(anyhow!("no chunk found in region"));
             }
         }
 
@@ -332,14 +332,14 @@ impl Region {
         let version = u32::from_le_bytes(version_data);
 
         if magic != "REGN" || version != 0 {
-            return Err(anyhow!("File invalid"));
+            return Err(anyhow!("file invalid"));
         }
 
         let mut block_data = Vec::new();
         file.read_to_end(&mut block_data)?;
 
         if block_data.len() % 4 != 0 {
-            return Err(anyhow!("File corrupted"));
+            return Err(anyhow!("file corrupted"));
         }
 
         let mut blocks = Vec::new();

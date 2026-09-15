@@ -34,7 +34,7 @@ impl ApplicationHandler for GameClient {
             WINDOW.init(
                 event_loop
                     .create_window(Window::default_attributes().with_title("To be Titled"))
-                    .expect("Failed to create window"),
+                    .expect("failed to create window"),
             );
 
             self.init();
@@ -155,12 +155,12 @@ impl GameClient {
             .stack_size(4 * 1024 * 1024)
             .thread_name(|i| format!("world_near_{}", i))
             .build()
-            .expect("Failed to build Thread Pool for near Regions");
+            .expect("failed to build thread pool for near regions");
         let far_threads = ThreadPoolBuilder::new()
             .stack_size(4 * 1024 * 1024)
             .thread_name(|i| format!("world_far_{}", i))
             .build()
-            .expect("Failed to build Thread Pool for far Regions");
+            .expect("failed to build thread pool for far regions");
         simulation
             .resources
             .register(WorldThreads(near_threads, far_threads));
@@ -263,8 +263,7 @@ impl GameClient {
         let canvas = pollster::block_on(Canvas::new(&WINDOW));
         SPRITE_GEOMETRY.init(create_sprite_geometry(&canvas));
 
-        let block_textures =
-            BlockTextures(create_block_textures().create_texture_sampler(&canvas, "block"));
+        let block_textures = BlockTextures(BLOCK_TEXTURES.create_texture_sampler(&canvas, "block"));
         let camera = Camera::new(&canvas);
         let world_renderer = WorldRenderer::new(&canvas);
         let selection_renderer = SelectionRenderer::new(&canvas);

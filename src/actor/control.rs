@@ -67,7 +67,7 @@ impl SelectedItem {
                 let bound = block
                     .bounds(BlockPos::ZERO)
                     .merge()
-                    .expect("Selected Block doesn't have bounds");
+                    .expect("selected block should have bounds");
                 Mesh::<BasicVertex>::frame(bound.min, bound.max)
             }
             _ => Mesh::new(),

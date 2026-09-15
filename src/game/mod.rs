@@ -40,6 +40,6 @@ impl Game {
         error!("{}", info);
         let trace = Backtrace::capture();
         error!("{}", trace);
-        error!("Oh no, Game crashed!");
+        error!("oh no, game crashed!");
     }
 }

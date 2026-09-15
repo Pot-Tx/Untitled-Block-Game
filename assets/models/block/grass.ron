@@ -1,0 +1,19 @@
+[(
+    template: "cube_w",
+    texture: "grass_top",
+), (
+    template: "cube_e",
+    texture: "grass_top",
+), (
+    template: "cube_d",
+    texture: "dirt",
+), (
+    template: "cube_u",
+    texture: "grass_top",
+), (
+    template: "cube_n",
+    texture: "grass_top",
+), (
+    template: "cube_s",
+    texture: "grass_top",
+)]

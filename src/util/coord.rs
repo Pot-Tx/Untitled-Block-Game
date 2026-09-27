@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::ops::*;
 
+/// One of the three world axes, in the order `x`, `y`, `z`.
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Axis {
     X,
@@ -12,6 +13,9 @@ pub enum Axis {
     Z,
 }
 
+/// The six faces of a block, named after the compass directions they point to.
+///
+/// `East` is `+x`, `Up` is `+y`, and `South` is `+z`.
 #[derive(Clone, Copy, Eq, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Direction {
     West,
@@ -23,6 +27,7 @@ pub enum Direction {
 }
 
 impl Axis {
+    /// Every axis, ordered so that [`Self::idx`] indexes into this slice.
     pub const ALL: &'static [Self; 3] = &[Self::X, Self::Y, Self::Z];
 
     #[inline]
@@ -77,6 +82,10 @@ impl Axis {
 }
 
 impl Direction {
+    /// Every direction, ordered so that [`Self::idx`] indexes into this slice.
+    ///
+    /// The order matches the six faces of a cuboid produced by
+    /// `Mesh::cuboid` and `BlockModelTemplate::cuboid`.
     pub const ALL: &'static [Self; 6] = &[
         Self::West,
         Self::East,
@@ -103,6 +112,7 @@ impl Direction {
         }
     }
 
+    /// The four directions that lie in the plane perpendicular to this one.
     #[inline]
     pub const fn plane(&self) -> &[Self] {
         match self {
@@ -141,6 +151,7 @@ impl Direction {
         }
     }
 
+    /// The unit vector pointing in this direction.
     #[inline]
     pub fn vector<C: Coord3>(&self) -> C
     where
@@ -159,6 +170,11 @@ impl Direction {
     }
 }
 
+/// A vector-like value that can be used as a coordinate, with the scalar type
+/// and dimension it is built from.
+///
+/// Implemented for the `glam` vector types; the associated [`Coord3`] traits
+/// add the operations that need exactly three components.
 pub trait Coord:
     Copy
     + Clone
@@ -325,9 +341,9 @@ macro_rules! impl_coord3_for {
 	            #[inline]
                 fn shift(mut self, a: Axis, v: Self::Scalar) -> Self {
                     match a {
-                        Axis::X => self.x = self.x + v,
-                        Axis::Y => self.y = self.y + v,
-                        Axis::Z => self.z = self.z + v,
+                        Axis::X => self.x += v,
+                        Axis::Y => self.y += v,
+                        Axis::Z => self.z += v,
                     }
                     self
                 }

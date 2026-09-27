@@ -10,8 +10,10 @@ use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::OnceLock;
 
+/// Identifier of an entity, component, resource, or registry entry.
 pub type Id = u32;
 
+/// Hands out entity ids, reusing the ids of removed entities through a free list.
 #[derive(Default)]
 pub struct IdManager {
     recycled: VecDeque<Id>,
@@ -23,26 +25,29 @@ impl IdManager {
         Self::default()
     }
 
+    /// Returns a recycled id when one is available, otherwise the next fresh id.
     pub fn create(&mut self) -> Id {
-        let id = match self.recycled.pop_front() {
+        match self.recycled.pop_front() {
             Some(id) => id,
             None => {
                 self.next += 1;
                 self.next - 1
             }
-        };
-        id
+        }
     }
 
+    /// Returns `id` to the free list so that [`Self::create`] can hand it out again.
     pub fn recycle(&mut self, id: Id) {
         self.recycled.push_back(id);
     }
 }
 
+/// Hands out contiguous blocks of ids and keeps the released blocks sorted by base.
 pub struct IdAllocator {
     free: Vec<IdBlock>,
 }
 
+/// A run of `len` consecutive free ids starting at `base`.
 struct IdBlock {
     base: Id,
     len: u32,
@@ -64,6 +69,7 @@ impl IdAllocator {
         Self::default()
     }
 
+    /// Removes `len` ids from the first free block that is large enough.
     pub fn alloc(&mut self, len: u32) -> Id {
         for i in 0..self.free.len() {
             let block = &mut self.free[i];
@@ -77,9 +83,10 @@ impl IdAllocator {
                 return base;
             }
         }
-        unreachable!()
+        unreachable!("id allocator has no free block of length {len}")
     }
 
+    /// Releases the `len` ids starting at `base`, merging them with adjacent free blocks.
     pub fn free(&mut self, base: Id, len: u32) {
         for i in 0..self.free.len() {
             let block = &mut self.free[i];
@@ -101,6 +108,10 @@ impl IdAllocator {
     }
 }
 
+/// A [`OnceLock`] that panics when it is dereferenced before [`Self::init`] has run.
+///
+/// Used for global values that are only available once a window exists.
+#[derive(Default)]
 pub struct OnceInit<T> {
     inner: OnceLock<T>,
 }
@@ -112,21 +123,24 @@ impl<T> Deref for OnceInit<T> {
     fn deref(&self) -> &Self::Target {
         self.inner
             .get()
-            .expect("OnceInit should be initialized before dereferenced")
+            .expect("OnceInit should be initialized before it is dereferenced")
     }
 }
 
 impl<T> OnceInit<T> {
+    /// Creates an uninitialised cell; usable in `const` context.
     pub const fn new() -> Self {
         Self {
             inner: OnceLock::new(),
         }
     }
 
+    /// Returns whether the cell already holds a value.
     pub fn ready(&self) -> bool {
         self.inner.get().is_some()
     }
 
+    /// Stores `value`, logging an error when the cell was already initialised.
     pub fn init(&self, value: T) {
         if self.inner.set(value).is_err() {
             error!("OnceInit already initialized");
@@ -134,6 +148,12 @@ impl<T> OnceInit<T> {
     }
 }
 
+/// Two slots that a producer fills alternately, so a consumer keeps reading the
+/// previous value until the new one is ready.
+///
+/// [`Self::set`] stages a value in the slot that [`Self::get`] is not reading;
+/// [`Self::update`] counts the staged value down and flips the slots when it
+/// expires, dropping the value that was visible before.
 pub struct SwapPair<T> {
     left: Option<T>,
     right: Option<T>,
@@ -169,6 +189,8 @@ impl<T> SwapPair<T> {
         Self::default()
     }
 
+    /// Stages `item`, which becomes visible after `time` calls to [`Self::update`]
+    /// (immediately when `time` is zero).
     #[inline]
     pub fn set(&mut self, item: T, time: u8) {
         if self.on_right {
@@ -188,6 +210,8 @@ impl<T> SwapPair<T> {
         }
     }
 
+    /// Ticks the countdown and returns whether no swap is pending, flipping the
+    /// slots and dropping the previous value once the countdown expires.
     #[inline]
     pub fn update(&mut self) -> bool {
         if self.timer > 0 {
@@ -208,6 +232,7 @@ impl<T> SwapPair<T> {
         }
     }
 
+    /// Returns the value that is currently visible.
     #[inline]
     pub fn get(&self) -> Option<&T> {
         if self.on_right {

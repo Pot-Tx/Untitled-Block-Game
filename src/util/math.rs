@@ -3,6 +3,7 @@ use num_traits::{One, Zero};
 use smallvec::SmallVec;
 use std::ops::Index;
 
+/// Tests whether all elements of a collection compare equal.
 pub trait AllEq {
     fn all_eq(&self) -> bool;
 }
@@ -38,6 +39,13 @@ impl<T: Eq + PartialEq> AllEq for Vec<T> {
     }
 }
 
+/// Iterates the L1 shell of `radius` around `center`, that is every position
+/// whose distance from the center, measured as `|x| + |y| + |z|`, equals the
+/// radius.
+///
+/// The shell is walked through the single octant `x >= 0, y >= 0, z >= 0`; each
+/// position found there is then mirrored into every octant that is still on the
+/// shell, which is what `poses` caches.
 pub struct L1ShellIter<C: SCoord3> {
     pub radius: C::Scalar,
     pub center: C,
@@ -49,9 +57,10 @@ pub struct L1ShellIter<C: SCoord3> {
 }
 
 impl<C: SCoord3> L1ShellIter<C> {
+    /// Creates the iterator for the shell of `radius` around `center`.
     pub fn new(center: C, radius: C::Scalar) -> Self {
         L1ShellIter {
-            radius: radius,
+            radius,
             center,
             x: C::Scalar::zero(),
             y: -C::Scalar::one(),
@@ -115,9 +124,16 @@ impl<C: SCoord3> Iterator for L1ShellIter<C> {
     }
 }
 
+/// Iterates the positions on the surface of an axis aligned cube.
+///
+/// The six faces are visited in the order of `Direction::ALL`; each face is then
+/// walked along `z` first and along `y` second. The faces at `x = origin` and
+/// `x = max` claim the cube edges, so the remaining faces only iterate their
+/// interior and every position is yielded exactly once.
 pub struct CubeShellIter<C: SCoord3> {
     pub origin: C,
     pub max: C,
+    /// Index of the face being iterated, in the order of `Direction::ALL`.
     face: u8,
     i: C::Scalar,
     j: C::Scalar,
@@ -128,6 +144,7 @@ pub struct CubeShellIter<C: SCoord3> {
 }
 
 impl<C: SCoord3> CubeShellIter<C> {
+    /// Creates the iterator for the shell of a cube with the given `side`.
     pub fn new(origin: C, side: C::Scalar) -> Self {
         let side = side - C::Scalar::one();
         let max = origin + C::new(side, side, side);
@@ -147,6 +164,7 @@ impl<C: SCoord3> CubeShellIter<C> {
         iter
     }
 
+    /// Creates the iterator for the shell of the cube centred on `center`.
     pub fn from_center(center: C, radius: C::Scalar) -> Self {
         let one = C::Scalar::one();
         let side = radius + radius + one;
@@ -239,18 +257,18 @@ impl<C: SCoord3> CubeShellIter<C> {
             3 => C::new(self.i, my, self.j),
             4 => C::new(self.i, self.j, oz),
             5 => C::new(self.i, self.j, mz),
-            _ => unreachable!(),
+            _ => unreachable!("face index should be within 0..6"),
         }
     }
 
     fn advance(&mut self) -> bool {
         let one = C::Scalar::one();
-        self.j = self.j + one;
+        self.j += one;
         if self.j <= self.j_max {
             return true;
         }
         self.j = self.j_min;
-        self.i = self.i + one;
+        self.i += one;
         if self.i <= self.i_max {
             return true;
         }

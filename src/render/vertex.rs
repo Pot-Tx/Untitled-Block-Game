@@ -5,6 +5,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use wgpu::*;
+/// A vertex format, described by the attributes the shaders read.
+///
+/// `LAYOUT` has to list exactly the attributes of the struct, in the order the
+/// fields are declared, because `ATTRIBUTE_COUNT` is used as the first shader
+/// location of the instance attributes that follow.
 pub trait Vertex:
     Copy + Clone + Sync + Send + Pod + Zeroable + Debug + Serialize + DeserializeOwned
 {
@@ -22,22 +27,27 @@ pub trait Vertex:
     fn multiply(self, scale: <Self::Pos as Coord>::Scalar) -> Self;
 }
 
+/// The per instance data of a batch.
+///
+/// The attributes of an instance start at the shader location after the last
+/// attribute of the vertex format.
 pub trait Inst: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
-    const EMPTY: bool;
-
     fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>>;
 }
 
+/// A vertex without attributes, for geometry that only uses indices.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NoVertex;
 
+/// The position of a vertex, without a normal or texture coordinates.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct BasicVertex {
     pub pos: Vec3,
 }
 
+/// A vertex that also carries a normal.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NormVertex {
@@ -45,14 +55,17 @@ pub struct NormVertex {
     pub norm: Vec3,
 }
 
+/// A vertex that also carries a texture index and its uv coordinates.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TexVertex {
     pub pos: Vec3,
+    /// Index of the layer to sample in the block texture array.
     pub tex: u32,
     pub uv: Vec2,
 }
 
+/// A vertex that also carries a uv and a normal.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NormUvVertex {
@@ -61,38 +74,47 @@ pub struct NormUvVertex {
     pub norm: Vec3,
 }
 
+/// The vertex format of the block mesh: position, texture, uv and normal.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NormTexVertex {
     pub pos: Vec3,
+    /// Index of the layer to sample in the block texture array.
     pub tex: u32,
     pub uv: Vec2,
     pub norm: Vec3,
 }
 
+/// A vertex whose transparency depends on how many neighbours it has.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct AlphaVertex {
     pub pos: Vec3,
+    /// How much of the vertex is occluded by the blocks around it, accumulated
+    /// from its opaque neighbours and used to shade the occlusion mesh.
     pub alpha: f32,
 }
 
+/// The instance type of batches that draw a single object.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct NoInst;
 
+/// An instance that only positions its object.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TransInst {
     pub pos: Vec3,
 }
 
+/// An instance that positions its object at integer coordinates.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct IntTransInst {
     pub pos: IVec3,
 }
 
+/// Implements the parts of [`Vertex`] that every format shares.
 macro_rules! vertex_basics {
     ($pos:ty, $count:expr) => {
         type Pos = $pos;
@@ -396,16 +418,12 @@ impl Vertex for AlphaVertex {
 }
 
 impl Inst for () {
-    const EMPTY: bool = true;
-
     fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
         None
     }
 }
 
 impl Inst for TransInst {
-    const EMPTY: bool = false;
-
     fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
         Some(VertexBufferLayout {
             array_stride: size_of::<Self>() as BufferAddress,
@@ -420,8 +438,6 @@ impl Inst for TransInst {
 }
 
 impl Inst for IntTransInst {
-    const EMPTY: bool = false;
-
     fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
         Some(VertexBufferLayout {
             array_stride: size_of::<Self>() as BufferAddress,

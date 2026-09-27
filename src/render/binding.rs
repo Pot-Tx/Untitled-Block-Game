@@ -2,19 +2,28 @@ use crate::render::{Canvas, FromConfig};
 use std::marker::PhantomData;
 use wgpu::*;
 
+/// A `wgpu` object that can be bound to a shader binding.
 pub trait BindRes {
     fn as_resource(&self) -> BindingResource<'_>;
 }
 
+/// The bind group entries of a bind set, in binding order.
 pub trait BindContent<'a> {
     fn to_bindings(&self) -> Vec<BindGroupEntry<'a>>;
 }
 
+/// The layout and the content of one bind group.
+///
+/// Implemented for single resources and for tuples of them, so that a bind
+/// group can hold any number of bindings; the position in the tuple is the
+/// shader binding index.
 pub trait BindSignature: 'static {
     const NAME: &'static str;
+    /// The entries of the bind group layout, in the same order as the content.
     const LAYOUTS: &'static [BindGroupLayoutEntry];
     type Content<'a>: BindContent<'a>;
 
+    /// Creates the bind group layout on `canvas`.
     fn layout(canvas: &Canvas) -> BindGroupLayout {
         canvas
             .device
@@ -25,11 +34,13 @@ pub trait BindSignature: 'static {
     }
 }
 
+/// An allocated bind group, created from the content of a [`BindSignature`].
 pub struct BindSet<S: BindSignature> {
     pub bind_group: BindGroup,
     _marker: PhantomData<S>,
 }
 
+/// The name and content of a bind group to create.
 pub struct BindSetConfig<'a, S: BindSignature> {
     pub name: &'a str,
     pub content: S::Content<'a>,

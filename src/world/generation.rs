@@ -18,16 +18,30 @@ use smallvec::{smallvec, SmallVec};
 use std::ops::{Add, AddAssign, Mul, MulAssign};
 use std::sync::Arc;
 
+/// The density and climate field of one region, sampled on a coarse grid.
 type SampleGrid = Volume<Sample>;
+/// The grids of the regions around the player, indexed by region position.
 type SampleGridView = Volume<Arc<SampleGrid>>;
+/// Number of blocks between two samples of a grid.
 const SAMPLE_INTERVAL: u8 = 8;
+/// Number of samples along one axis of a grid, without its halo.
 const GRID_SIZE: u8 = REGION_SIZE / SAMPLE_INTERVAL;
+/// Number of samples along one axis of a grid, including the halo that the
+/// gradient needs.
 const GRID_STRIDE: u8 = GRID_SIZE + 1;
 
 impl SampleGridView {
+    /// Samples the field at `pos` by interpolating the surrounding grid.
+    ///
+    /// `lod` widens the distance between the corners that are read, and `halo`
+    /// redirects the sample towards the corner of the cell with the lowest
+    /// density, so that the surface of a coarse block keeps following the fine
+    /// geometry it replaces.
     fn interpolate(&self, pos: LocalPos, lod: u8, halo: bool) -> Sample {
         let origin = pos / SAMPLE_INTERVAL;
         let size = Region::block_size_on_lod(lod);
+        // With a cell of one block there is nothing to interpolate, so the step
+        // between the corners stays at one sample.
         let offset = (size / SAMPLE_INTERVAL).max(1);
         let corners = U8Vec3::corners(U8Vec3::ZERO, U8Vec3::ONE);
         let samples = corners.map(|corner| {
@@ -56,6 +70,9 @@ impl SampleGridView {
 
         let mut value = Sample::default();
 
+        // `rate` is the position of `pos` inside the cell, so the per axis
+        // weights are `rate` and `1 - rate`. Their products sum to one, which is
+        // why the accumulated value needs no normalisation.
         for (&corner, sample) in corners.iter().zip(samples) {
             let weight = (rate - (1 - corner).as_vec3()).abs();
             value += sample * weight.element_product();
@@ -65,11 +82,18 @@ impl SampleGridView {
     }
 }
 
+/// A [`RingVolume`](crate::world::RingVolume) whose entries can be read and
+/// replaced while the worker threads are running.
+///
+/// The generation of a region fills in the grids of its neighbours, which is
+/// why the generator keeps this volume in shared memory rather than owning it.
 pub struct ArcRingVolume<T> {
     pub volume: Volume<ArcSwapOption<T>>,
     pub bound: ArcSwap<AABB<IVec3>>,
 }
 
+// SAFETY: the entries are `ArcSwapOption` cells and the bound is an `ArcSwap`,
+// so every value is published atomically; the volume itself is never resized.
 unsafe impl<T> Sync for ArcRingVolume<T> {}
 
 impl<T> ArcRingVolume<T> {
@@ -88,14 +112,16 @@ impl<T> ArcRingVolume<T> {
         pos.rem_euclid(self.volume.size.as_ivec3()).as_u8vec3()
     }
 
+    /// The grid of the region at `pos`, which has to lie inside the volume.
     pub fn get(&self, pos: IVec3) -> Result<Option<Arc<T>>> {
         if self.bound.load().is_point_inside(pos) {
             Ok(self.volume.get(self.cast_pos(pos)).load_full())
         } else {
-            Err(anyhow!("position out of bound"))
+            Err(anyhow!("position is out of bounds"))
         }
     }
 
+    /// Stores the grid of the region at `pos`.
     pub fn set(&self, pos: IVec3, value: T) -> Result<Option<Arc<T>>> {
         if self.bound.load().is_point_inside(pos) {
             Ok(self
@@ -103,10 +129,11 @@ impl<T> ArcRingVolume<T> {
                 .get(self.cast_pos(pos))
                 .swap(Some(Arc::new(value))))
         } else {
-            Err(anyhow!("position out of bound"))
+            Err(anyhow!("position is out of bounds"))
         }
     }
 
+    /// Moves the volume by `dpos`, clearing the entries that fall outside it.
     pub fn translate(&self, dpos: IVec3) {
         let bound = self.bound.load();
         let new_bound = bound.translate(dpos);
@@ -151,16 +178,23 @@ impl<T> ArcRingVolume<T> {
     }
 }
 
+/// The noise functions the terrain is built from, sampled at a block position.
 pub struct Field {
+    /// Climate of a position, currently unused by the terrain function.
     pub climate: fn(BlockPos) -> Vec3,
+    /// Signed density: positive is inside the terrain, zero is its surface.
     pub density: fn(BlockPos) -> f32,
+    /// Signed erosion: negative means the material is not eroded away.
     pub erosion: fn(BlockPos) -> f32,
 }
 
+/// The field values at one position, which is what the terrain function turns
+/// into a block.
 #[derive(Clone, Copy, Default)]
 pub struct Sample {
     pub climate: Vec3,
     pub density: f32,
+    /// Gradient of the density, used to place the surface blocks.
     pub gradient: Vec3,
     pub erosion: f32,
 }
@@ -209,6 +243,10 @@ impl MulAssign<f32> for Sample {
     }
 }
 
+/// A block structure, such as a tree, that is placed at random sites.
+///
+/// `blocks` holds one volume per level of detail, where a `None` entry leaves
+/// the block that is already there untouched.
 pub struct Structure {
     pub blocks: SmallVec<[Volume<Option<Meta>>; LOD_COUNT]>,
     pub condition: fn(&SampleGridView, LocalPos) -> bool,
@@ -216,6 +254,7 @@ pub struct Structure {
 }
 
 impl Structure {
+    /// The oak tree: a canopy, a two block wide trunk and a single block top.
     pub fn tree() -> Self {
         let mut blocks0 = Volume::new(U8Vec3::new(5, 8, 5));
         blocks0.fill(U8Vec3::new(0, 4, 1), U8Vec3::new(5, 7, 4), Some(5));
@@ -253,11 +292,13 @@ impl Structure {
     }
 }
 
+/// The world generator: turns regions of samples into chunks of blocks.
 pub struct Generator {
     context: Arc<GenContext>,
     task_rx: Receiver<GenTask>,
 }
 
+/// The shared state of the generator, which the worker threads read.
 pub struct GenContext {
     field: Field,
     grids: ArcRingVolume<SampleGrid>,
@@ -269,6 +310,7 @@ pub struct GenContext {
 }
 
 impl Generator {
+    /// Creates the generator and the ring of grids it fills in.
     pub fn new(
         center: RegionPos,
         radius: u8,
@@ -292,6 +334,11 @@ impl Generator {
         }
     }
 
+    /// Dispatches the queued generation tasks onto the thread pool of the level
+    /// of detail they belong to.
+    ///
+    /// The near and far tasks are kept apart so that a slow coarse region cannot
+    /// hold up the regions around the player.
     pub fn update(&mut self, translation: IVec3, threads: &WorldThreads) {
         self.context.update(translation);
 
@@ -378,6 +425,8 @@ impl Generator {
             }
         }
 
+        // Structures are placed before the surface decoration runs, so that the
+        // decoration also sees the blocks a structure added.
         for x in 1..stride - 1 {
             for y in 1..stride - 1 {
                 for z in 1..stride - 1 {
@@ -405,6 +454,8 @@ impl GenContext {
         self.sites.translate(translation);
     }
 
+    /// The sample grids of the `side ^ 3` regions starting at `pos`, generating
+    /// the grids that are missing.
     fn samples_in_range(&self, pos: RegionPos, side: u8) -> Result<SampleGridView> {
         let mut vec = Vec::with_capacity((side as usize).pow(3));
 
@@ -417,6 +468,9 @@ impl GenContext {
                     if self.grids.get(pos)?.is_none() {
                         let origin = pos * REGION_SIZE as i32;
 
+                        // The grid is sampled with a one sample halo, so that the
+                        // gradient of every grid sample can be computed from its
+                        // neighbours.
                         let mut grid = Volume::from_fn(U8Vec3::splat(GRID_STRIDE + 2), |pos| {
                             let pos = origin + (pos.as_ivec3() - 1) * SAMPLE_INTERVAL as i32;
                             Sample {
@@ -449,11 +503,16 @@ impl GenContext {
                             }
                         }
 
+                        // Drop the halo, which was only needed for the gradient.
                         grid = grid.part(U8Vec3::ONE, U8Vec3::splat(GRID_STRIDE));
                         self.grids.set(pos, grid)?;
                     }
 
-                    vec.push(self.grids.get(pos)?.unwrap());
+                    vec.push(
+                        self.grids
+                            .get(pos)?
+                            .expect("grid should have been generated above"),
+                    );
                 }
             }
         }
@@ -464,6 +523,8 @@ impl GenContext {
         })
     }
 
+    /// The sites of every structure in the `side ^ 3` regions starting at `pos`,
+    /// as offsets from the block position of the first region.
     fn sites_in_range(&self, pos: RegionPos, side: u8) -> Result<Vec<Vec<LocalPos>>> {
         let mut sites = vec![Vec::new(); self.structures.len()];
 
@@ -482,6 +543,9 @@ impl GenContext {
                             .enumerate()
                             .map(|(i, structure)| {
                                 let mut struct_sites = Vec::new();
+                                // Seeding with the region and the structure
+                                // keeps the sites of a region stable across
+                                // reloads.
                                 let mut rand = Seeder::from((pos, i)).into_rng::<Pcg64Mcg>();
                                 for _ in 0..structure.count {
                                     let pos = rand.random::<LocalPos>() % REGION_SIZE;
@@ -498,7 +562,12 @@ impl GenContext {
 
                     sites
                         .iter_mut()
-                        .zip(self.sites.get(pos)?.unwrap().iter())
+                        .zip(
+                            self.sites
+                                .get(pos)?
+                                .expect("sites should have been generated above")
+                                .iter(),
+                        )
                         .for_each(|(struct_sites, region_sites)| {
                             for site in region_sites.iter() {
                                 struct_sites.push(site + offset * REGION_SIZE);
@@ -512,15 +581,18 @@ impl GenContext {
     }
 }
 
+/// A request to generate the chunk of one region.
 pub struct GenTask {
     pub pos: RegionPos,
     pub lod: u8,
     pub tx: Sender<GenResult>,
 }
 
+/// The chunk of a generated region.
 pub struct GenResult {
     pub lod: u8,
     pub chunk: Chunk,
 }
 
+/// The resource that owns the generator, so that a system can drive it.
 impl Resource for Generator {}

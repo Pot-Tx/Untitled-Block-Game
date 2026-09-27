@@ -7,8 +7,11 @@ use glam::Vec3;
 use std::fmt;
 use std::fmt::Debug;
 use std::sync::LazyLock;
-pub static BLOCK_TYPES: LazyLock<Registry<BlockType>> = LazyLock::new(|| build_block_types());
+/// The block types of the game, in the order their ids are registered in.
+pub static BLOCK_TYPES: LazyLock<Registry<BlockType>> = LazyLock::new(build_block_types);
 
+/// Builds the block types, taking the models of the blocks that have one from
+/// [`BLOCK_MODEL_TEMPLATES`](crate::world::model::BLOCK_MODEL_TEMPLATES).
 fn build_block_types() -> Registry<BlockType> {
     let mut block_types = Registry::new();
     let models = Registry::<BlockModel>::load_rons_from("assets/models/block")
@@ -93,18 +96,33 @@ fn build_block_types() -> Registry<BlockType> {
     block_types
 }
 
+/// A block type and its state, packed into the value that a chunk stores.
+///
+/// The lowest 12 bits hold the id of the block type and the upper 4 bits its
+/// state.
 pub type Meta = u16;
+/// The state of a block: the combination of its properties.
 pub type State = u8;
 
+/// One block type: the models it is drawn with, the boxes it collides with and
+/// how much light it lets through.
 pub struct BlockType {
+    /// The models this block can be drawn with; the state selects one of them.
     pub models: Vec<BlockModel>,
+    /// The collision boxes for every state, in block coordinates.
     pub bounds: Vec<Vec<AABB<Vec3>>>,
+    /// Selects the model that belongs to a state.
     pub model_idx_of_state: fn(State) -> usize,
+    /// Selects the collision boxes that belong to a state.
     pub bounds_idx_of_state: fn(State) -> usize,
+    /// How much the block dims the light on each axis, where zero is fully
+    /// transparent.
     pub opacity: Vec3,
+    /// The state a block of this type is created with.
     pub default_state: State,
 }
 
+/// One block in the world: its type, its state and a reference to its type.
 #[derive(Copy, Clone)]
 pub struct Block {
     pub type_id: Id,
@@ -112,6 +130,7 @@ pub struct Block {
     pub state: State,
 }
 
+/// One property of a block, stored as a part of its state.
 pub trait Property {
     type Output;
 
@@ -138,11 +157,13 @@ impl Debug for Block {
 }
 
 impl Block {
+    /// The block of the air type, which has no collisions and no model.
     #[inline]
     pub fn air() -> Self {
         Self::default_of(0)
     }
 
+    /// The block of type `type_id` in its default state.
     #[inline]
     pub fn default_of(type_id: Id) -> Self {
         let block_type = BLOCK_TYPES.get(type_id);
@@ -154,6 +175,7 @@ impl Block {
         }
     }
 
+    /// The block a chunk entry stands for.
     #[inline]
     pub fn from_meta(meta: Meta) -> Self {
         let type_id = (meta & 0xFFF) as Id;
@@ -164,22 +186,26 @@ impl Block {
         }
     }
 
+    /// The chunk entry that stands for this block.
     #[inline]
     pub fn to_meta(&self) -> Meta {
         self.type_id as Meta + ((self.state as Meta) << 12)
     }
 
+    /// The value of the property `P` in the state of this block.
     #[inline]
     pub fn get_property<P: Property>(&self) -> P::Output {
         P::get_value_from_state(self.state)
     }
 
+    /// Stores the value of `P` in the state of this block.
     #[inline]
     pub fn set_property<P: Property>(&mut self, value: P::Output) -> &mut Self {
         self.state = P::push_value_to_state(value, self.state);
         self
     }
 
+    /// The block with the value of `P` set, leaving this one unchanged.
     #[inline]
     pub fn with_property<P: Property>(&self, value: P::Output) -> Self {
         let mut state = *self;
@@ -187,12 +213,14 @@ impl Block {
         state
     }
 
+    /// The model this block is drawn with.
     #[inline]
     pub fn model(&self) -> &BlockModel {
         let block_type = self.block_type;
         &block_type.models[(block_type.model_idx_of_state)(self.state)]
     }
 
+    /// The collision boxes of this block, in world coordinates.
     #[inline]
     pub fn bounds(&self, pos: BlockPos) -> Vec<AABB<Vec3>> {
         let block_type = self.block_type;

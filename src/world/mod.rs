@@ -1,3 +1,10 @@
+//! The voxel world: a ring of regions around the player, generated and meshed
+//! on background threads.
+//!
+//! Regions are the unit of storage and loading, sub-regions the unit of
+//! meshing, and every region is kept at the level of detail that its distance
+//! from the player asks for.
+
 mod block;
 mod generation;
 mod model;
@@ -28,18 +35,30 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 use wgpu::{Color, LoadOp, PrimitiveTopology};
 
+/// Position of a region, in region sized steps.
 pub type RegionPos = IVec3;
+/// Position of a block, in blocks.
 pub type BlockPos = IVec3;
+/// The blocks of one region, including a one block halo on every side so that
+/// the mesher can see the neighbours of its border blocks.
 pub type Chunk = Volume<Meta>;
+/// The number of levels of detail, including level 0.
 pub const LOD_COUNT: usize = MAX_LOD as usize + 1;
+/// How often the changed regions are written to disk.
 static SAVE_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_mins(5));
 
+/// A sliding window onto a larger grid.
+///
+/// Positions are mapped into a volume of `2 * radius + 1` entries by wrapping
+/// around, so moving the window by one step only has to clear the slabs that
+/// leave it.
 pub struct RingVolume<T: Clone> {
     pub volume: Volume<Option<T>>,
     pub bound: AABB<IVec3>,
 }
 
 impl<T: Clone> RingVolume<T> {
+    /// Creates an empty volume covering the region cube around `center`.
     pub fn new(center: IVec3, radius: u8) -> Self {
         Self {
             volume: Volume::new(U8Vec3::splat(radius * 2 + 1)),
@@ -55,6 +74,8 @@ impl<T: Clone> RingVolume<T> {
         pos.rem_euclid(self.volume.size.as_ivec3()).as_u8vec3()
     }
 
+    /// The value stored for `pos`, or `None` when `pos` is outside the window or
+    /// its entry is empty.
     pub fn get(&self, pos: IVec3) -> Option<&T> {
         if self.bound.is_point_inside(pos) {
             self.volume.get(self.cast_pos(pos)).as_ref()
@@ -63,6 +84,7 @@ impl<T: Clone> RingVolume<T> {
         }
     }
 
+    /// Mutable access to the value stored for `pos`.
     pub fn get_mut(&mut self, pos: IVec3) -> Option<&mut T> {
         if self.bound.is_point_inside(pos) {
             self.volume.get_mut(self.cast_pos(pos)).as_mut()
@@ -71,6 +93,7 @@ impl<T: Clone> RingVolume<T> {
         }
     }
 
+    /// Stores `value` for `pos`, returning the value that was there before.
     pub fn set(&mut self, pos: IVec3, value: T) -> Option<T> {
         if self.bound.is_point_inside(pos) {
             self.volume.set(self.cast_pos(pos), Some(value))
@@ -79,6 +102,7 @@ impl<T: Clone> RingVolume<T> {
         }
     }
 
+    /// Moves the window by `dpos`, clearing the entries that fall outside it.
     pub fn translate(&mut self, dpos: IVec3) {
         let new_bound = self.bound.translate(dpos);
 
@@ -113,13 +137,20 @@ impl<T: Clone> RingVolume<T> {
     }
 }
 
+/// The regions around the player, with the state of their loading and meshing.
 pub struct World {
+    /// Outer radius of each level of detail, ordered from the finest level to
+    /// the coarsest one.
     lod_radii: SmallVec<[u8; LOD_COUNT]>,
+    /// The level of detail that is currently being filled in.
     update_lod: u8,
+    /// The position each level has been filled up to, as a shell around the
+    /// player.
     update_iters: SmallVec<[Option<CubeShellIter<RegionPos>>; LOD_COUNT]>,
     regions: RingVolume<Region>,
     generating_regions: HashSet<RegionPos>,
     meshing_regions: HashSet<RegionPos>,
+    /// The regions that have to be written back to disk on the next save.
     changed_regions: HashSet<RegionPos>,
     save_timer: Instant,
 
@@ -128,12 +159,15 @@ pub struct World {
 }
 
 resources! {
+    /// Downwards acceleration applied to every actor that cannot fly.
     pub struct Gravity(f32);
 }
 
 impl Resource for World {}
 
 impl World {
+    /// Work budget of one call to [`Self::update`], in blocks that may be added
+    /// to the world.
     const MAX_UPDATE_COST: usize = 1024;
 
     pub fn new(
@@ -144,14 +178,17 @@ impl World {
     ) -> Self {
         let mut update_iters = SmallVec::new();
         for i in 0..lod_radii.len() {
+            // Each level fills its own annulus: level 0 grows from the centre
+            // outwards, and every other level starts just outside the radius of
+            // the level above it.
             let radius = if i == 0 { 0 } else { lod_radii[i - 1] + 1 };
             update_iters.push(Some(CubeShellIter::from_center(center, radius as i32)));
         }
 
-        for &r in lod_radii.iter() {
-            update_iters.push(Some(CubeShellIter::from_center(center, r as i32)));
-        }
-        let regions = RingVolume::new(center, *lod_radii.last().unwrap() as u8);
+        let regions = RingVolume::new(
+            center,
+            *lod_radii.last().expect("lod_radii should not be empty"),
+        );
 
         Self {
             lod_radii,
@@ -168,6 +205,8 @@ impl World {
         }
     }
 
+    /// Splits a block position into the region it belongs to and the position
+    /// inside that region.
     #[inline]
     pub fn cast_pos(pos: BlockPos) -> (RegionPos, LocalPos) {
         let region_size = IVec3::splat(REGION_SIZE as i32);
@@ -176,6 +215,11 @@ impl World {
         (region_pos, rel_block_pos)
     }
 
+    /// The regions whose chunk has to be remeshed when the block at `pos`
+    /// changes.
+    ///
+    /// A block on the border of a region is part of the halo of its neighbours,
+    /// so up to eight regions are influenced by a single change.
     #[inline]
     fn pos_influence(pos: BlockPos) -> SmallVec<[RegionPos; 8]> {
         let mut influenced = SmallVec::new();
@@ -201,6 +245,7 @@ impl World {
         influenced
     }
 
+    /// The block at `pos`, or air when its region is not loaded.
     pub fn get_block(&self, pos: BlockPos) -> Block {
         let (region_pos, rel_block_pos) = Self::cast_pos(pos);
         if let Some(region) = self.regions.get(region_pos) {
@@ -210,10 +255,14 @@ impl World {
         }
     }
 
+    /// Sets the block at `pos` and queues the affected regions for remeshing.
     pub fn set_block(&mut self, pos: BlockPos, block: Block) {
         let (region_pos, rel_block_pos) = Self::cast_pos(pos);
         for influenced_region_pos in Self::pos_influence(pos) {
             if let Some(region) = self.regions.get_mut(influenced_region_pos) {
+                // The region local position, moved into the halo of the region
+                // that is being written: the difference between the two regions
+                // converted to blocks, plus the one block wide border.
                 let pos = (rel_block_pos.as_i16vec3()
                     + (region_pos - influenced_region_pos).as_i16vec3() * REGION_SIZE as i16
                     + 1)
@@ -226,9 +275,16 @@ impl World {
         }
     }
 
+    /// Follows the player, fills in the levels of detail around the new centre
+    /// and polls the regions that are still being generated.
+    ///
+    /// The work per call is bounded by `MAX_UPDATE_COST`, so a fast player
+    /// spreads the loading of new regions over several ticks.
     pub fn update(&mut self, canvas: &Canvas, center: RegionPos, translation: IVec3) {
         if translation != IVec3::ZERO {
             self.regions.translate(translation);
+            // Restart each level at the shell the translation left off at, so
+            // that regions that are already loaded are not generated again.
             let translation = translation.abs().element_sum();
 
             for i in 0..self.lod_radii.len() as u8 {
@@ -257,6 +313,8 @@ impl World {
 
         while self.update_lod < self.lod_radii.len() as u8 {
             let level = self.update_lod as usize;
+            // A region of a coarse level covers the same area with fewer
+            // blocks, so it counts towards less of the budget than a fine one.
             let complexity = (LOD_COUNT - level).pow(2);
             let max_radius = self.lod_radii[level];
 
@@ -290,6 +348,8 @@ impl World {
                 }
 
                 if cost < Self::MAX_UPDATE_COST {
+                    // The shell is exhausted, so widen it by one region unless
+                    // the level has reached its outer radius.
                     let next_radius = ((iter.max - iter.origin).x as u8 / 2) + 1;
                     if next_radius <= max_radius {
                         *iter = CubeShellIter::from_center(center, next_radius as i32);
@@ -303,6 +363,8 @@ impl World {
             }
         }
 
+        // A region that finished generating can be meshed, which is what the
+        // next call to `pre_render` picks up.
         self.generating_regions.retain(|&pos| {
             if let Some(region) = self.regions.get_mut(pos) {
                 if region.poll() {
@@ -323,6 +385,7 @@ impl World {
         }
     }
 
+    /// Uploads the meshes of the regions that finished meshing.
     pub fn pre_render(&mut self, canvas: &Canvas) {
         self.meshing_regions.retain(|&pos| {
             if let Some(region) = self.regions.get_mut(pos) {
@@ -333,21 +396,25 @@ impl World {
         });
     }
 
+    /// Writes every region that changed since the last save back to disk.
     pub fn save(&mut self) {
         for pos in self.changed_regions.drain() {
-            if let Some(region) = self.regions.get_mut(pos) {
-                if let Err(e) = region.save() {
-                    error!("failed to save region {}: {}", pos, e);
-                }
+            if let Some(region) = self.regions.get_mut(pos)
+                && let Err(e) = region.save()
+            {
+                error!("failed to save region {}: {}", pos, e);
             }
         }
     }
 }
 
 resources! {
+    /// The thread pools that generate and mesh regions: the first one serves the
+    /// near levels of detail, the second one the far ones.
     pub struct WorldThreads(ThreadPool, ThreadPool);
 }
 
+/// Follows the player with the world and with the generator.
 pub struct WorldUpdater;
 
 impl System for WorldUpdater {
@@ -380,6 +447,7 @@ impl System for WorldUpdater {
     }
 }
 
+/// Draws the blocks and the occlusion mesh of every visible region.
 pub struct WorldRenderer {
     block_desc: RenderDescriptor<'static>,
     block_batch: RenderBatch<(TextureArraySampler, Transformation), NormTexVertex, IntTransInst>,
@@ -415,8 +483,7 @@ impl System for WorldRenderer {
             .volume
             .vec
             .iter()
-            .filter(|&region| region.is_some())
-            .map(|region| region.as_ref().unwrap())
+            .filter_map(|region| region.as_ref())
             .collect::<Vec<_>>();
         regions.retain(|&region| res.3.frustum.is_aabb_inside(region.bound()));
 
@@ -446,6 +513,7 @@ impl System for WorldRenderer {
 }
 
 impl WorldRenderer {
+    /// Creates the pipelines of the block and the occlusion pass.
     pub fn new(canvas: &Canvas) -> Self {
         Self {
             block_desc: RenderDescriptor {

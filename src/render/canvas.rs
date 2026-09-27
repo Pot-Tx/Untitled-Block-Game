@@ -6,6 +6,7 @@ use wgpu::*;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
+/// The attachments and command encoder of the frame that is being recorded.
 pub struct Frame {
     surface_texture: SurfaceTexture,
     pub color: TextureView,
@@ -13,16 +14,19 @@ pub struct Frame {
     pub encoder: CommandEncoder,
 }
 
+/// The name and the attachment load operations of a render pass.
 pub struct RenderDescriptor<'a> {
     pub name: &'a str,
     pub color_load: LoadOp<Color>,
     pub depth_load: LoadOp<f32>,
 }
 
+/// The name of a compute pass.
 pub struct ComputeDescriptor<'a> {
     pub name: &'a str,
 }
 
+/// The window surface, its configuration and the device the game draws with.
 pub struct Canvas {
     surface: Surface<'static>,
     pub surface_config: SurfaceConfiguration,
@@ -34,13 +38,16 @@ pub struct Canvas {
 impl Resource for Canvas {}
 
 impl Canvas {
+    /// Creates the device and the swap chain of `window`.
     pub async fn new(window: &'static Window) -> Self {
         let wgpu_instance = Instance::default();
         let size = window.inner_size();
         let width = size.width.max(1);
         let height = size.height.max(1);
 
-        let surface = wgpu_instance.create_surface(window).unwrap();
+        let surface = wgpu_instance
+            .create_surface(window)
+            .expect("failed to create surface");
         let adapter = wgpu_instance
             .request_adapter(&RequestAdapterOptions {
                 power_preference: PowerPreference::default(),
@@ -96,6 +103,8 @@ impl Canvas {
         }
     }
 
+    /// Reconfigures the surface and recreates the depth texture for a window of
+    /// `size`.
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         let width = size.width.max(1);
         let height = size.height.max(1);
@@ -120,6 +129,7 @@ impl Canvas {
         });
     }
 
+    /// Acquires the next surface texture and starts recording a frame.
     pub fn begin(&self) -> Frame {
         if let Success(surface_texture) = self.surface.get_current_texture() {
             let color = TextureView::new(
@@ -151,19 +161,23 @@ impl Canvas {
                 encoder,
             }
         } else {
-            panic!("Failed to get next surface texture");
+            panic!("failed to get next surface texture");
         }
     }
 
+    /// Submits the recorded commands and presents the frame.
     pub fn end(&self, frame: Frame) {
         self.queue.submit(Some(frame.encoder.finish()));
         self.queue.present(frame.surface_texture);
     }
 }
 
+/// The frame that is currently being recorded, shared with the systems that
+/// draw into it and empty outside of rendering.
 impl Resource for Option<Frame> {}
 
 impl Frame {
+    /// Records a render pass with the attachments of this frame.
     pub fn render<F: FnOnce(RenderPass)>(&mut self, desc: &RenderDescriptor, f: F) {
         let pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
             label: Label::from(format!("{}_render_pass", desc.name).as_str()),
@@ -191,49 +205,12 @@ impl Frame {
         f(pass);
     }
 
+    /// Records a compute pass.
     pub fn compute<F: FnOnce(ComputePass)>(&mut self, desc: &ComputeDescriptor, f: F) {
         let pass = self.encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Label::from(format!("{}_compute_pass", desc.name).as_str()),
             timestamp_writes: None,
         });
         f(pass);
-    }
-}
-
-pub struct RenderStarter;
-
-pub struct RenderFinisher;
-
-impl System for RenderStarter {
-    type CompQuery = ();
-    type ResQuery = (ResRead<Canvas>, ResWrite<Option<Frame>>);
-
-    fn operate<'a>(
-        &mut self,
-        _: <Self::CompQuery as CompQuery>::Item<'a>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
-    ) -> Option<Vec<Command>> {
-        res.1.replace(res.0.begin());
-
-        None
-    }
-}
-
-impl System for RenderFinisher {
-    type CompQuery = ();
-    type ResQuery = (ResRead<Canvas>, ResWrite<Option<Frame>>);
-
-    fn operate<'a>(
-        &mut self,
-        _: <Self::CompQuery as CompQuery>::Item<'a>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
-    ) -> Option<Vec<Command>> {
-        res.0.end(
-            res.1
-                .take()
-                .expect("Failed to finish rendering. Make sure to use Canvas::begin first!"),
-        );
-
-        None
     }
 }

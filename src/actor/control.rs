@@ -11,22 +11,25 @@ use glam::Vec3;
 use wgpu::{LoadOp, PrimitiveTopology};
 
 components! {
+    /// Marks the actor the player steers.
+    #[derive(Clone, Copy)]
     pub struct PlayerControlled: Cold;
+
+    /// What the player is looking at, and what an interaction would affect.
+    #[derive(Clone, Copy)]
+    pub struct Selection(Option<SelectedItem>): Cold;
 }
 
-pub struct Selection {
-    item: SelectedItem,
-    geometry: Geometry<BasicVertex>,
-    instance: Instances<TransInst>,
-}
-
-#[derive(Debug)]
+/// The thing the player points at.
+#[derive(Clone, Copy, Debug)]
 pub enum SelectedItem {
+    /// A block, with the face the ray entered it through.
     Block {
         pos: BlockPos,
         block: Block,
         face: Direction,
     },
+    /// An actor, with its position and its collision box.
     Actor {
         entity: Id,
         pos: Vec3,
@@ -34,33 +37,8 @@ pub enum SelectedItem {
     },
 }
 
-impl Component for Option<Selection> {
-    const STORAGE_TYPE: StorageType = StorageType::Cold;
-}
-
 impl SelectedItem {
-    fn update(&self, other: &Self) -> (bool, bool) {
-        match (self, other) {
-            (
-                Self::Block { pos, block, .. },
-                Self::Block {
-                    pos: pos1,
-                    block: block1,
-                    ..
-                },
-            ) => (block != block1, pos != pos1),
-
-            (
-                Self::Actor { entity, .. },
-                Self::Actor {
-                    entity: entity1, ..
-                },
-            ) => (entity != entity1, true),
-
-            _ => (true, true),
-        }
-    }
-
+    /// The wireframe that outlines the selection.
     fn mesh(&self) -> Mesh<BasicVertex> {
         match self {
             Self::Block { block, .. } => {
@@ -74,6 +52,7 @@ impl SelectedItem {
         }
     }
 
+    /// The position the selection is drawn at.
     fn inst(&self) -> TransInst {
         TransInst {
             pos: match self {
@@ -84,26 +63,25 @@ impl SelectedItem {
     }
 }
 
-impl Render<BasicVertex, TransInst> for Selection {
-    fn rendered(&self) -> Vec<RenderItem<'_, BasicVertex, TransInst>> {
-        vec![RenderItem {
-            geometry: &self.geometry,
-            instances: &self.instance,
-        }]
-    }
-}
-
+/// Turns the movement and jump actions into velocity.
 pub struct PlayerController;
 
+/// Turns the mouse motion into the rotation of the player.
 pub struct PlayerRotator;
 
+/// Shoots a ray through the world and stores what the player looks at.
 pub struct Selector;
 
+/// Breaks and places blocks when the attack and interact actions are pressed.
 pub struct Interactor;
 
+/// Draws the outline of the current selection.
 pub struct SelectionRenderer {
     desc: RenderDescriptor<'static>,
     batch: RenderBatch<Transformation, BasicVertex, TransInst>,
+    vertices: BufferVec<BasicVertex>,
+    indices: BufferVec<u16>,
+    instances: BufferVec<TransInst>,
 }
 
 impl System for PlayerController {
@@ -125,6 +103,9 @@ impl System for PlayerController {
         if res.cursor_grabbed {
             let mut dir = Vec3::ZERO;
 
+            // The ids are the entries of `INPUT_MAP`: 1 forward, 2 left,
+            // 3 backward, 4 right, 5 ascend, 6 descend, 7 attack and
+            // 8 interact.
             if res.is_action_present(1) {
                 dir.z += 1.0;
             }
@@ -143,6 +124,9 @@ impl System for PlayerController {
 
             let mut speed = entry.4.0;
             match entry.5 {
+                // Without flight, the player may only jump from the ground; the
+                // speed is reduced in every other case, which keeps the player
+                // from drifting sideways in the air.
                 None => {
                     if let Some(contact) = entry.6 {
                         if let Some(p) = contact.0[Axis::Y.idx()]
@@ -193,12 +177,8 @@ impl System for PlayerRotator {
 }
 
 impl System for Selector {
-    type CompQuery = (
-        CompWrite<Option<Selection>>,
-        CompRead<Position>,
-        CompRead<Rotation>,
-    );
-    type ResQuery = (ResRead<Canvas>, ResRead<World>);
+    type CompQuery = (CompWrite<Selection>, CompRead<Position>, CompRead<Rotation>);
+    type ResQuery = ResRead<World>;
 
     fn operate(
         &mut self,
@@ -210,30 +190,8 @@ impl System for Selector {
             direction: entry.3.direction(),
         };
 
-        if let Some(item) = ray.traverse(res.1, 8.0) {
-            if let Some(selection) = entry.1 {
-                let (g, i) = selection.item.update(&item);
-                if g {
-                    selection.geometry = item.mesh().geometry(res.0, "selection");
-                }
-                if i {
-                    selection.instance = [item.inst()].instances(res.0, "selection");
-                }
-
-                selection.item = item;
-            } else {
-                let geometry = item.mesh().geometry(res.0, "selection");
-                let instance = [item.inst()].instances(res.0, "selection");
-
-                entry.1.replace(Selection {
-                    item,
-                    geometry,
-                    instance,
-                });
-            }
-        } else {
-            entry.1.take();
-        }
+        // The player can only reach a few blocks.
+        entry.1.0 = ray.traverse(res, 8.0);
 
         None
     }
@@ -242,7 +200,7 @@ impl System for Selector {
 impl System for Interactor {
     type CompQuery = (
         CompRead<PlayerControlled>,
-        CompRead<Option<Selection>>,
+        CompRead<Selection>,
         CompRead<Position>,
         CompRead<Bound>,
     );
@@ -253,9 +211,14 @@ impl System for Interactor {
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        if let Some(selection) = entry.2 {
+        if !res.0.cursor_grabbed {
+            return None;
+        }
+
+        if let Some(selected) = entry.2.0 {
             if res.0.is_action_present(7) {
-                match selection.item {
+                match selected {
+                    // Breaking a block replaces it with air.
                     SelectedItem::Block { pos, .. } => {
                         res.1.set_block(pos, Block::air());
                     }
@@ -265,7 +228,9 @@ impl System for Interactor {
             }
 
             if res.0.is_action_present(8) {
-                match selection.item {
+                match selected {
+                    // Placing a block needs the face the ray entered through,
+                    // and it has to be free of the player's own collision box.
                     SelectedItem::Block { pos, face, .. } => {
                         let block = Block::default_of(1);
                         let bound = entry.4.translate(entry.3);
@@ -289,25 +254,52 @@ impl System for Interactor {
 }
 
 impl System for SelectionRenderer {
-    type CompQuery = CompRead<Option<Selection>>;
-    type ResQuery = (ResWrite<Option<Frame>>, ResRead<Camera>);
+    type CompQuery = CompRead<Selection>;
+    type ResQuery = (ResWrite<Option<Frame>>, ResRead<Camera>, ResRead<Canvas>);
 
     fn operate(
         &mut self,
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        if let Some(frame) = res.0
-            && let Some(selection) = entry.1
-        {
+        let canvas = res.2;
+
+        match entry.1.0 {
+            Some(item) => {
+                let mesh = item.mesh();
+                self.vertices.set_content(canvas, &mesh.vertices);
+                self.indices.set_content(canvas, &mesh.indices);
+                self.instances.set_content(canvas, &[item.inst()]);
+            }
+
+            None => {
+                self.vertices.set_content(canvas, &[]);
+                self.indices.set_content(canvas, &[]);
+                self.instances.set_content(canvas, &[]);
+            }
+        }
+
+        if let Some(frame) = res.0 {
             frame.render(&self.desc, |mut pass| {
                 self.batch.begin(&mut pass);
                 self.batch.push(&mut pass, &res.1.transform);
-                self.batch.draw(&mut pass, selection);
+                self.batch.draw(&mut pass, self);
             });
         }
 
         None
+    }
+}
+
+impl Render<BasicVertex, TransInst> for SelectionRenderer {
+    fn rendered(&self) -> Vec<RenderItem<'_, BasicVertex, TransInst>> {
+        let mut items = Vec::new();
+
+        if let Ok(item) = RenderItem::new(&self.vertices, &self.indices, &self.instances) {
+            items.push(item);
+        }
+
+        items
     }
 }
 
@@ -320,7 +312,7 @@ impl SelectionRenderer {
                 depth_load: LoadOp::Load,
             },
             batch: RenderBatch::new(
-                &canvas,
+                canvas,
                 &RenderBatchConfig {
                     name: "selection",
                     shader: "selection",
@@ -329,6 +321,9 @@ impl SelectionRenderer {
                     depth_write: false,
                 },
             ),
+            vertices: BufferVec::vertex(canvas, "selection_vertex", BufferInit::Size(0)),
+            indices: BufferVec::index(canvas, "selection_index", BufferInit::Size(0)),
+            instances: BufferVec::vertex(canvas, "selection_instance", BufferInit::Size(0)),
         }
     }
 }

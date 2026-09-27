@@ -1,3 +1,10 @@
+//! Block models and the mesher that turns chunks into geometry.
+//!
+//! A block model is a list of parts, each of which is a mesh template with a
+//! texture. Parts of the same model that share a texture are merged into
+//! rectangles before they are uploaded, which is what keeps the vertex count of
+//! a chunk low.
+
 use crate::ecs::*;
 use crate::render::{AlphaVertex, BindSet, Mesh, MeshGroup, NormTexVertex, NormUvVertex, Tex};
 use crate::util::collection::Registry;
@@ -13,46 +20,67 @@ use std::array;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
+/// The mesh templates that block models refer to, loaded from their `.ron` files.
 pub static BLOCK_MODEL_TEMPLATES: LazyLock<Registry<BlockModelTemplate>> = LazyLock::new(|| {
     Registry::load_rons_from("assets/models/block/templates")
         .expect("failed to load block model templates")
 });
 
+/// The textures the block models sample, loaded from their png files.
 pub static BLOCK_TEXTURES: LazyLock<Registry<Tex>> = LazyLock::new(|| {
     Registry::<Tex>::load_from("assets/textures/block").expect("failed to load block textures")
 });
 
 resources! {
+    /// The texture array that the block batch samples, which is built once the
+    /// canvas exists.
     pub struct BlockTextures(BindSet<TextureArraySampler>);
 }
 
+/// The meshes one block type is drawn with, and the faces a solid neighbour
+/// culls.
 #[derive(Clone, Default)]
 pub struct BlockModel {
     meshes: Vec<BlockModelPart>,
+    /// Whether the face in the direction at the index is culled by an opaque
+    /// neighbour; indexed by [`Direction::idx`].
     cull: [bool; 6],
 }
 
+/// One part of a block model: a template drawn with a texture.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct BlockModelPart {
     pub template: Id,
     pub texture: Id,
 }
 
+/// A block model part as it is written to a `.ron` file, with names instead of
+/// ids so that the registries can be reordered without breaking the files.
 #[derive(Serialize, Deserialize)]
 struct RawBlockModelPart<'a> {
     template: &'a str,
     texture: &'a str,
 }
 
+/// The mesh of one part of a block model, together with what the mesher needs to
+/// know about it.
 #[derive(Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
 pub struct BlockModelTemplate {
     mesh: Mesh<NormUvVertex>,
+    /// Whether the mesh has to be drawn with the translucent pass.
     translucent: bool,
+    /// The direction the mesh can be culled from, when it covers a whole face of
+    /// a block.
     cull: Option<Direction>,
+    /// The axes along which neighbouring copies of this template may be merged.
     spans: SmallVec<[MergeSpan; 2]>,
 }
 
+/// One axis along which a template may be merged.
+///
+/// `ends` lists the vertices that have to be moved when the face is stretched,
+/// and `uv_unit` is how far the uv of those vertices advances per block.
 #[derive(Serialize, Deserialize)]
 pub struct MergeSpan {
     axis: Axis,
@@ -94,7 +122,11 @@ impl<'de> Deserialize<'de> for BlockModelPart {
 }
 
 impl BlockModelTemplate {
+    /// The six faces of the box from `min` to `max`, in the order of
+    /// [`Direction::ALL`], which is also the order of `Mesh::cuboid`.
     pub fn cuboid(min: Vec3, max: Vec3, translucent: [bool; 6]) -> [Self; 6] {
+        // The u and v axes of each face, chosen so that the texture is not
+        // mirrored when it is seen from outside the block.
         let uvs = Direction::ALL.map(|dir| {
             let (udir, vdir) = match dir {
                 Direction::West => (Direction::South, Direction::Down),
@@ -122,6 +154,8 @@ impl BlockModelTemplate {
             ]
         });
 
+        // A face that covers the whole box can be merged with the faces of the
+        // neighbouring blocks, which is what makes a flat wall a single quad.
         let mut merge_axis = Axis::ALL.to_vec();
         merge_axis.retain(|&a| min.get(a) < 0.001 && max.get(a) > 0.999);
 
@@ -130,12 +164,10 @@ impl BlockModelTemplate {
         array::from_fn(|i| {
             let dir = Direction::by_idx(i);
             let axis = dir.axis();
-            let cull = if {
-                if dir.positive() {
-                    max.get(axis) > 0.999
-                } else {
-                    min.get(axis) < 0.001
-                }
+            let cull = if if dir.positive() {
+                max.get(axis) > 0.999
+            } else {
+                min.get(axis) < 0.001
             } {
                 Some(dir)
             } else {
@@ -151,14 +183,16 @@ impl BlockModelTemplate {
                             Direction::Down => (vec![0, 3], Vec2::new(0.0, -1.0)),
                             Direction::Up | Direction::South => (vec![2, 3], Vec2::new(1.0, 0.0)),
                             Direction::North => (vec![0, 1], Vec2::new(-1.0, 0.0)),
-                            _ => unreachable!(),
+                            // The other directions cannot produce a full x face.
+                            _ => unreachable!("{:?} cannot merge along the x axis", dir),
                         },
                         Axis::Y => (vec![0, 3], Vec2::new(0.0, -1.0)),
                         Axis::Z => match dir {
                             Direction::West => (vec![2, 3], Vec2::new(1.0, 0.0)),
                             Direction::East | Direction::Down => (vec![0, 1], Vec2::new(-1.0, 0.0)),
                             Direction::Up => (vec![1, 2], Vec2::new(0.0, 1.0)),
-                            _ => unreachable!(),
+                            // The other directions cannot produce a full z face.
+                            _ => unreachable!("{:?} cannot merge along the z axis", dir),
                         },
                     };
 
@@ -181,6 +215,7 @@ impl BlockModelTemplate {
 }
 
 impl BlockModel {
+    /// Builds a model from its parts, recording the faces that are culled.
     pub fn new(meshes: Vec<BlockModelPart>) -> Self {
         let mut cull = [false; 6];
 
@@ -194,15 +229,19 @@ impl BlockModel {
         Self { meshes, cull }
     }
 
+    /// A model without parts, which is what air and empty blocks use.
     pub fn empty() -> Self {
         Self::default()
     }
 
+    /// Returns whether an opaque neighbour in `dir` hides this model.
     fn culls(&self, dir: Direction) -> bool {
         self.cull[dir.idx()]
     }
 }
 
+/// A request to mesh a chunk: a single sub-region when `pos` is set, otherwise
+/// the whole region.
 pub struct MeshingTask {
     pub lod: u8,
     pub pos: Option<SubRegionPos>,
@@ -210,6 +249,7 @@ pub struct MeshingTask {
     pub tx: Sender<MeshingResult>,
 }
 
+/// The meshes of a chunk that finished meshing.
 pub struct MeshingResult {
     pub lod: u8,
     pub pos: Option<SubRegionPos>,
@@ -217,25 +257,39 @@ pub struct MeshingResult {
     pub occlusion: Mesh<AlphaVertex>,
 }
 
+/// The mesher, which owns the receiving end of the meshing queue.
 pub struct ChunkMesher {
     task_rx: Receiver<MeshingTask>,
 }
 
+/// Merges the equally shaped faces of one template into larger rectangles.
+///
+/// The blocks are stored as one bitmask per line: `lines` is indexed by two of
+/// the three axes, and a set bit marks a block along the merge axis
+/// `axes[0]`. `two` tells whether the template may also be merged along a second
+/// axis, which is what turns a row into a rectangle.
 struct MeshMerger {
     lines: Vec<u64>,
     side: u8,
     axes: [Axis; 3],
     two: bool,
+    /// Position the next search resumes from.
     current: (usize, u8),
 }
 
+/// The resource that owns the mesher, so that a system can drive it.
 impl Resource for ChunkMesher {}
 
 impl ChunkMesher {
+    /// Creates the mesher around the receiving end of the meshing queue.
     pub fn new(task_rx: Receiver<MeshingTask>) -> Self {
         Self { task_rx }
     }
 
+    /// Dispatches the queued meshing tasks onto the thread pools.
+    ///
+    /// Sub-regions of the near levels of detail are meshed by the near pool, so
+    /// that a queue of far regions cannot delay the geometry around the player.
     pub fn update(&mut self, threads: &WorldThreads) {
         let WorldThreads(near_threads, far_threads) = threads;
 
@@ -261,6 +315,8 @@ impl ChunkMesher {
         });
     }
 
+    /// Meshes one task and sends the result back to the region that asked for
+    /// it.
     fn perform(task: MeshingTask) {
         let (mut blocks, mut occlusion) = Self::build_meshes(&task.chunk);
 
@@ -291,6 +347,8 @@ impl ChunkMesher {
     }
 
     fn build_meshes(chunk: &Chunk) -> (Mesh<NormTexVertex>, Mesh<AlphaVertex>) {
+        // Merging needs to see every block of a template, so the positions are
+        // collected first and merged afterwards.
         let mut temp_mergers = HashMap::new();
         let [w, h, d] = (chunk.size - 2).to_array();
 
@@ -307,6 +365,8 @@ impl ChunkMesher {
                     for temp_mesh in block.model().meshes.iter() {
                         let template = BLOCK_MODEL_TEMPLATES.get(temp_mesh.template);
 
+                        // A face that a full block covers is never visible, so it
+                        // is left out of the mesh.
                         if let Some(dir) = template.cull {
                             let adj_pos = real_pos.step(dir);
                             let adj_block = Block::from_meta(*chunk.get(adj_pos));
@@ -317,6 +377,9 @@ impl ChunkMesher {
                         }
 
                         if !template.translucent {
+                            // The occlusion mesh shades the vertices that touch an
+                            // opaque block, which draws the ambient occlusion of
+                            // the block corners.
                             let mut vertices = Vec::new();
                             let mut add = false;
 
@@ -324,6 +387,11 @@ impl ChunkMesher {
                                 let pos = vertex.pos;
                                 let mut alpha = 0.0;
 
+                                // Only the opaque blocks that touch this vertex
+                                // shade it: the two neighbours beside the face of
+                                // a culled template, and the three blocks around
+                                // the vertex of an unculled one. Every opaque
+                                // neighbour adds a fixed share of occlusion.
                                 match template.cull {
                                     Some(dir) => {
                                         let adj_pos = real_pos.step(dir);
@@ -423,6 +491,10 @@ impl ChunkMesher {
 impl Iterator for MeshMerger {
     type Item = (U8Vec3, SmallVec<[u8; 2]>);
 
+    /// Takes the run of set bits at the current position, then grows the
+    /// rectangle over the following lines for as long as they have a run of the
+    /// same length. The item is the corner of the rectangle and how far it
+    /// extends along each merge axis.
     fn next(&mut self) -> Option<Self::Item> {
         let n = self.side as usize;
 
@@ -444,6 +516,9 @@ impl Iterator for MeshMerger {
             let pos = self.pos_of_bit(self.current);
             let mut extent = SmallVec::new();
 
+            // The run of set bits is the length of the rectangle along the first
+            // merge axis; `trailing_ones` counts it, `dist` is the distance the
+            // far vertices have to be moved.
             let dist = (self.lines[idx] >> bit).trailing_ones() as u8 - 1;
             let removal = !(((1u64 << (dist + 1)) - 1) << bit);
             extent.push(dist);
@@ -452,6 +527,8 @@ impl Iterator for MeshMerger {
             if self.two {
                 let mut dist1 = 0;
 
+                // Only the lines of the same row can extend the rectangle, and
+                // they have to cover the run that was just consumed.
                 for idx1 in idx + 1..((idx / n) + 1) * n {
                     if (self.lines[idx1] >> bit).trailing_ones() as u8 > dist {
                         dist1 += 1;
@@ -472,12 +549,16 @@ impl Iterator for MeshMerger {
 }
 
 impl MeshMerger {
+    /// Creates a merger for a `side` by `side` plane whose merge axes are the
+    /// ones the template declares.
     fn new(side: u8, spans: &[MergeSpan]) -> Self {
+        // The merge axes take the first slots of `axes`, so that the bit of a
+        // position is its coordinate along the merge axis.
         let masks = vec![0; (side as usize).pow(2)];
         let mut axes = *Axis::ALL;
         let span_count = spans.len();
-        for i in 0..span_count {
-            axes.swap(i, spans[i].axis.idx());
+        for (i, span) in spans.iter().enumerate().take(span_count) {
+            axes.swap(i, span.axis.idx());
         }
 
         Self {
@@ -489,6 +570,7 @@ impl MeshMerger {
         }
     }
 
+    /// The position a bit of the plane stands for.
     #[inline]
     fn pos_of_bit(&self, bit: (usize, u8)) -> U8Vec3 {
         let (idx, bit) = bit;
@@ -500,6 +582,7 @@ impl MeshMerger {
             .with(self.axes[2], (idx / n) as u8)
     }
 
+    /// The bit a position stands for.
     #[inline]
     fn bit_of_pos(&self, pos: U8Vec3) -> (usize, u8) {
         debug_assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
@@ -509,12 +592,14 @@ impl MeshMerger {
         (idx, pos.get(self.axes[0]))
     }
 
+    /// Marks the position as occupied.
     fn add(&mut self, pos: U8Vec3) {
         let (idx, bit) = self.bit_of_pos(pos);
         self.lines[idx] |= 1u64 << bit;
     }
 }
 
+/// Handles the meshing queue every tick.
 pub struct ChunkMeshing;
 
 impl System for ChunkMeshing {

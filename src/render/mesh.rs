@@ -1,41 +1,13 @@
 use crate::render::canvas::Canvas;
 use crate::render::vertex::*;
-use crate::render::{BufferConfig, BufferInit, FromConfig};
+use crate::render::{BufferInit, BufferVec, QUAD_INDICES};
 use crate::util::coord::*;
 use crate::util::Id;
 use glam::*;
 use serde::{Deserialize, Serialize};
 use std::array;
-use std::marker::PhantomData;
-use wgpu::*;
 
-pub const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
-
-pub trait Render<V: Vertex, I: Inst> {
-    fn rendered(&self) -> Vec<RenderItem<'_, V, I>>;
-}
-
-#[derive(Clone)]
-pub struct Geometry<V: Vertex> {
-    pub vertex_buffer: Option<Buffer>,
-    pub index_buffer: Buffer,
-    pub index_count: u32,
-    _marker: PhantomData<V>,
-}
-
-#[derive(Clone)]
-pub struct Instances<I: Inst> {
-    pub instance_buffer: Option<Buffer>,
-    pub instance_count: u32,
-    _marker: PhantomData<I>,
-}
-
-#[derive(Clone)]
-pub struct RenderItem<'a, V: Vertex, I: Inst> {
-    pub geometry: &'a Geometry<V>,
-    pub instances: &'a Instances<I>,
-}
-
+/// An indexed triangle mesh of `V` vertices.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
 pub struct Mesh<V: Vertex> {
@@ -57,11 +29,13 @@ impl<V: Vertex> Mesh<V> {
         Self::default()
     }
 
+    /// Returns whether the mesh has no triangles.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
     }
 
+    /// Moves every vertex by `dpos`.
     #[inline]
     pub fn translate(&mut self, dpos: V::Pos) -> &mut Self {
         self.vertices.iter_mut().for_each(|v| {
@@ -70,6 +44,7 @@ impl<V: Vertex> Mesh<V> {
         self
     }
 
+    /// The mesh moved by `dpos`.
     #[inline]
     pub fn translated(&self, dpos: V::Pos) -> Self {
         let vertices = self.vertices.iter().map(|v| v.translate(dpos)).collect();
@@ -80,6 +55,7 @@ impl<V: Vertex> Mesh<V> {
         }
     }
 
+    /// Scales every vertex position by `scale`.
     #[inline]
     pub fn scale(&mut self, scale: V::Pos) -> &mut Self {
         self.vertices.iter_mut().for_each(|v| {
@@ -88,6 +64,7 @@ impl<V: Vertex> Mesh<V> {
         self
     }
 
+    /// The mesh scaled by `scale`.
     #[inline]
     pub fn scaled(&self, scale: V::Pos) -> Self {
         let vertices = self.vertices.iter().map(|v| v.scale(scale)).collect();
@@ -98,6 +75,7 @@ impl<V: Vertex> Mesh<V> {
         }
     }
 
+    /// Scales every vertex position by the single factor `scale`.
     #[inline]
     pub fn multiply(&mut self, scale: <V::Pos as Coord>::Scalar) -> &mut Self {
         self.vertices.iter_mut().for_each(|v| {
@@ -106,6 +84,7 @@ impl<V: Vertex> Mesh<V> {
         self
     }
 
+    /// The mesh scaled by the single factor `scale`.
     #[inline]
     pub fn multiplied(&self, scale: <V::Pos as Coord>::Scalar) -> Self {
         let vertices = self.vertices.iter().map(|v| v.multiply(scale)).collect();
@@ -116,6 +95,7 @@ impl<V: Vertex> Mesh<V> {
         }
     }
 
+    /// Appends `other`, offsetting its indices by the current vertex count.
     #[inline]
     pub fn merge(&mut self, other: &Self) -> &mut Self {
         let offset = self.vertices.len() as u16;
@@ -132,45 +112,34 @@ impl<V: Vertex> Mesh<V> {
         self
     }
 
+    /// The mesh with `other` appended to it.
     #[inline]
     pub fn merged(&self, other: &Self) -> Self {
         let mut joined = self.clone();
-        joined.merge(&other);
+        joined.merge(other);
         joined
     }
 
-    pub fn geometry<'a>(&self, canvas: &Canvas, name: &'a str) -> Geometry<V> {
-        let vertex_buffer = if self.vertices.is_empty() {
-            None
-        } else {
-            Some(Buffer::new(
-                canvas,
-                &BufferConfig {
-                    name: &format!("{}_vertex", name),
-                    init: BufferInit::Content(&self.vertices),
-                    usage: BufferUsages::VERTEX,
-                },
-            ))
-        };
-
-        let index_buffer = Buffer::new(
+    /// Uploads the vertices into a vertex buffer.
+    pub fn vertex_buffer(&self, canvas: &Canvas, name: &str) -> BufferVec<V> {
+        BufferVec::vertex(
             canvas,
-            &BufferConfig {
-                name: &format!("{}_index", name),
-                init: BufferInit::Content(&self.indices),
-                usage: BufferUsages::INDEX,
-            },
-        );
+            &format!("{}_vertex", name),
+            BufferInit::Content(&self.vertices),
+        )
+    }
 
-        Geometry {
-            vertex_buffer,
-            index_buffer,
-            index_count: self.indices.len() as u32,
-            _marker: PhantomData,
-        }
+    /// Uploads the indices into an index buffer.
+    pub fn index_buffer_vec(&self, canvas: &Canvas, name: &str) -> BufferVec<u16> {
+        BufferVec::index(
+            canvas,
+            &format!("{}_index", name),
+            BufferInit::Content(&self.indices),
+        )
     }
 }
 
+/// A collection of meshes that can be joined into a single one.
 pub trait MeshGroup {
     type Vertex: Vertex;
 
@@ -193,6 +162,12 @@ impl<V: Vertex> MeshGroup for [Mesh<V>] {
 }
 
 impl Mesh<BasicVertex> {
+    /// The six faces of the box from `min` to `max`, in the order of
+    /// [`Direction::ALL`].
+    ///
+    /// Every face is a separate mesh with its own four vertices and the quad
+    /// indices of [`QUAD_INDICES`], which is what the other cuboid constructors
+    /// build on.
     pub fn cuboid(min: Vec3, max: Vec3) -> [Self; 6] {
         let p = Vec3::corners(min, max).map(|pos| BasicVertex { pos });
 
@@ -224,6 +199,7 @@ impl Mesh<BasicVertex> {
         ]
     }
 
+    /// The twelve edges of the box from `min` to `max`, as a line list.
     pub fn frame(min: Vec3, max: Vec3) -> Self {
         let p = Vec3::corners(min, max).map(|pos| BasicVertex { pos });
 
@@ -235,6 +211,7 @@ impl Mesh<BasicVertex> {
         }
     }
 
+    /// The same faces with the given normal on every vertex.
     pub fn with_normal(&self, norm: Vec3) -> Mesh<NormVertex> {
         Mesh {
             vertices: self.vertices.iter().map(|v| v.with_normal(norm)).collect(),
@@ -242,6 +219,7 @@ impl Mesh<BasicVertex> {
         }
     }
 
+    /// The same faces with the given texture and per-vertex uvs.
     pub fn with_texture(&self, tex: Id, uvs: Vec<Vec2>) -> Mesh<TexVertex> {
         Mesh {
             vertices: self
@@ -256,17 +234,20 @@ impl Mesh<BasicVertex> {
 }
 
 impl Mesh<NormVertex> {
+    /// The six faces of the box, in the order of [`Direction::ALL`], with the
+    /// outward normal of each face.
     pub fn cuboid(min: Vec3, max: Vec3) -> [Self; 6] {
         let cuboid = Mesh::<BasicVertex>::cuboid(min, max);
         array::from_fn(|i| cuboid[i].with_normal(Direction::by_idx(i).vector()))
     }
 
+    /// The same mesh with the given per-vertex uvs.
     pub fn with_uv(&self, uvs: Vec<Vec2>) -> Mesh<NormUvVertex> {
         Mesh {
             vertices: self
                 .vertices
                 .iter()
-                .zip(uvs.into_iter())
+                .zip(uvs)
                 .map(|(m, uv)| m.with_uv(uv))
                 .collect(),
             indices: self.indices.clone(),
@@ -275,11 +256,14 @@ impl Mesh<NormVertex> {
 }
 
 impl Mesh<TexVertex> {
+    /// The six faces of the box, in the order of [`Direction::ALL`], each with
+    /// its own texture and uvs.
     pub fn cuboid(min: Vec3, max: Vec3, texs: [Id; 6], uvs: [Vec<Vec2>; 6]) -> [Self; 6] {
         let cuboid = Mesh::<BasicVertex>::cuboid(min, max);
         array::from_fn(|i| cuboid[i].with_texture(texs[i], uvs[i].clone()))
     }
 
+    /// The same mesh with the given normal on every vertex.
     pub fn with_normal(&self, norm: Vec3) -> Mesh<NormTexVertex> {
         Mesh {
             vertices: self.vertices.iter().map(|m| m.with_normal(norm)).collect(),
@@ -289,11 +273,14 @@ impl Mesh<TexVertex> {
 }
 
 impl Mesh<NormUvVertex> {
+    /// The six faces of the box, in the order of [`Direction::ALL`], with the
+    /// outward normal of each face.
     pub fn cuboid(min: Vec3, max: Vec3, uvs: [Vec<Vec2>; 6]) -> [Self; 6] {
         let cuboid = Mesh::<NormVertex>::cuboid(min, max);
         array::from_fn(|i| cuboid[i].with_uv(uvs[i].clone()))
     }
 
+    /// The same mesh with the given texture on every vertex.
     pub fn with_texture(&self, tex: Id) -> Mesh<NormTexVertex> {
         Mesh {
             vertices: self.vertices.iter().map(|v| v.with_texture(tex)).collect(),
@@ -303,46 +290,18 @@ impl Mesh<NormUvVertex> {
 }
 
 impl Mesh<NormTexVertex> {
+    /// The six faces of the box, in the order of [`Direction::ALL`], each with
+    /// its own texture, uvs and outward normal.
     pub fn cuboid(min: Vec3, max: Vec3, texs: [Id; 6], uvs: [Vec<Vec2>; 6]) -> [Self; 6] {
         let cuboid = Mesh::<TexVertex>::cuboid(min, max, texs, uvs);
         array::from_fn(|i| cuboid[i].with_normal(Direction::by_idx(i).vector()))
     }
 
+    /// The same mesh with the given texture on every vertex.
     pub fn with_texture(&self, tex: Id) -> Self {
         Mesh {
             vertices: self.vertices.iter().map(|v| v.with_texture(tex)).collect(),
             indices: self.indices.clone(),
-        }
-    }
-}
-
-pub trait InstGroup {
-    type Inst: Inst;
-
-    fn instances<'a>(&self, canvas: &Canvas, name: &'a str) -> Instances<Self::Inst>;
-}
-
-impl<I: Inst> InstGroup for [I] {
-    type Inst = I;
-
-    fn instances<'a>(&self, canvas: &Canvas, name: &'a str) -> Instances<Self::Inst> {
-        let instance_buffer = if self.is_empty() {
-            None
-        } else {
-            Some(Buffer::new(
-                canvas,
-                &BufferConfig {
-                    name: &format!("{}_instance", name),
-                    init: BufferInit::Content(self),
-                    usage: BufferUsages::VERTEX,
-                },
-            ))
-        };
-
-        Instances {
-            instance_buffer,
-            instance_count: self.len() as u32,
-            _marker: PhantomData,
         }
     }
 }

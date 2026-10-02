@@ -1,0 +1,27 @@
+(
+    viewport: Middle,
+    elements: [
+        (
+            components: [
+                ("ui_rect", (min: (120.0, 120.0), max: (136.0, 136.0))),
+                ("ui_sprite", (
+                    tex: 1,
+                    uv: (min: (0.0, 0.0), max: (1.0, 1.0)),
+                    color: (1.0, 1.0, 1.0, 1.0),
+                )),
+            ],
+        ),
+        (
+            components: [
+                ("ui_rect", (min: (0.0, 0.0), max: (256.0, 16.0))),
+                ("ui_text", (
+                    text: "Oh, hi! Welcome to my block game!",
+                    h_align: Center,
+                    v_align: Top,
+                    color: (1.0, 1.0, 1.0, 1.0),
+                    scale: 10.0,
+                )),
+            ],
+        ),
+    ],
+)

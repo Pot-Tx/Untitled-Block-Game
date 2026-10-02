@@ -1,41 +1,32 @@
 use crate::ecs::*;
 use log::error;
 use rayon::prelude::{IntoParallelRefMutIterator, ParallelIterator};
+use std::any::type_name;
+use bimap::BiMap;
 
-/// One step of the game loop, which visits every entity that matches its
-/// component query.
-///
 /// A system declares what it reads and writes through its queries, which is what
 /// allows [`SystemManager`] to run systems that do not conflict in parallel.
 pub trait System: 'static + Sync + Send {
     type CompQuery: CompQuery;
     type ResQuery: ResQuery;
 
-    /// Validates the queries and calls [`Self::operate`] for every matching
-    /// entity, collecting the commands the system wants to queue.
     fn update(
         &mut self,
-        entities: &EntityManager,
-        resources: &ResourceManager,
-    ) -> Result<Vec<Command>, QueryError> {
-        Self::CompQuery::validate(&entities.components)?;
-        Self::ResQuery::validate(resources)?;
-
+        comp: Self::CompQuery,
+        res: Self::ResQuery,
+    ) -> Vec<Command> {
         let mut commands = Vec::new();
 
-        Self::ResQuery::run(resources, |mut res| {
-            Self::CompQuery::for_each(&entities.components, |entry| {
-                if let Some(new_commands) = self.operate(entry, &mut res) {
-                    commands.extend(new_commands);
-                }
-            });
-        });
+        let mut res = res.get();
+        for entry in comp.iter() {
+            if let Some(new_commands) = self.operate(entry, &mut res) {
+                commands.extend(new_commands);
+            }
+        }
 
-        Ok(commands)
+        commands
     }
 
-    /// Processes one entity, returning the commands it produced.
-    ///
     /// Defaults to doing nothing, so that a system may only override
     /// [`Self::update`] when it does not work per entity.
     fn operate(
@@ -59,10 +50,10 @@ trait SystemBridge: 'static + Sync + Send {
     ) -> Result<Vec<Command>, QueryError>;
 }
 
-/// Runs the registered systems, grouped into stages that may run in parallel.
 #[derive(Default)]
 pub struct SystemManager {
     stages: Vec<Vec<Box<dyn SystemBridge>>>,
+    names: BiMap<TypeId, &'static str>,
 }
 
 impl SystemManager {
@@ -70,19 +61,20 @@ impl SystemManager {
         Self::default()
     }
 
-    /// Queues `system` for the stage with the given `order`; lower orders run
-    /// first.
-    pub fn register<S: System>(&mut self, order: usize, system: S) {
+    pub fn register<S: System>(&mut self, order: usize, name: &'static str, system: S) {
         if self.stages.len() <= order {
             self.stages.resize_with(order + 1, Vec::new);
         }
 
         self.stages[order].push(Box::new(system));
+        self.names.insert(TypeId::of::<S>(), name);
     }
 
-    /// Splits every stage into sub-stages whose systems do not conflict, so that
-    /// they can run in parallel.
-    ///
+    /// The type id of the system that was registered under `name`.
+    pub fn type_id_of(&self, name: &str) -> Option<TypeId> {
+        self.names.get_by_right(name).copied()
+    }
+
     /// Has to be called once after all systems have been registered.
     pub fn init(&mut self) {
         let mut stages = Vec::new();
@@ -109,9 +101,6 @@ impl SystemManager {
         self.stages = stages;
     }
 
-    /// Runs every stage in order, executing the systems of a stage in parallel
-    /// and collecting the commands they produced.
-    ///
     /// The first error of a stage is reported after the stage finished, so that
     /// the systems that could run did run.
     pub fn update(
@@ -151,7 +140,7 @@ impl<S: System> SystemBridge for S {
         if !access.add(&S::ResQuery::access()) {
             error!(
                 "system {:?} accesses the same type as both a component and a resource",
-                TypeId::of::<S>(),
+                type_name::<S>(),
             );
         }
         access
@@ -162,6 +151,8 @@ impl<S: System> SystemBridge for S {
         entities: &EntityManager,
         resources: &ResourceManager,
     ) -> Result<Vec<Command>, QueryError> {
-        <S as System>::update(self, entities, resources)
+        let comp = <S as System>::CompQuery::new(&entities.components)?;
+        let res = <S as System>::ResQuery::new(resources)?;
+        Ok(<S as System>::update(self, comp, res))
     }
 }

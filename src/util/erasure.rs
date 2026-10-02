@@ -7,8 +7,6 @@ use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::{alloc, fmt, mem, ptr};
 
-/// An owned heap allocation whose value type has been erased.
-///
 /// The layout of the value is kept so that the allocation can be freed again,
 /// and `drop` and `clone` hold the monomorphised functions that know how to
 /// destroy or duplicate the value. `clone` is `None` for values that are not
@@ -20,8 +18,6 @@ pub struct ErasedBox {
     clone: Option<fn(*const u8) -> ErasedBox>,
 }
 
-/// A type erased `Vec` whose element layout is only known at runtime.
-///
 /// The elements are stored as bytes in `data`, whose length is therefore the
 /// number of bytes in use. The element count lives in a separate allocation so
 /// that `len` can be read through a shared reference, which is what makes
@@ -33,41 +29,34 @@ pub struct ErasedVec {
     drop: Option<fn(*mut u8)>,
 }
 
-/// A map from [`Id`] to a type erased value, with the ids in a [`SparseSet`].
 pub struct ErasedDenseMap {
     ids: SparseSet,
     items: ErasedVec,
 }
 
-/// A map from [`Id`] to a type erased value, with the ids in a `HashMap` that
-/// maps each id to its index in `items`.
 pub struct ErasedHashMap {
     ids: HashMap<Id, Id>,
     items: ErasedVec,
 }
 
-/// Iterates the values of an [`ErasedDenseMap`], read as `T`.
 pub struct ErasedDenseMapIter<'a, T> {
     id_iter: SparseSetIter<'a>,
     items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
 
-/// Mutably iterates the values of an [`ErasedDenseMap`], read as `T`.
 pub struct ErasedDenseMapIterMut<'a, T> {
     id_iter: SparseSetIter<'a>,
     items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
 
-/// Iterates the values of an [`ErasedHashMap`], read as `T`.
 pub struct ErasedHashMapIter<'a, T> {
     id_iter: hash_map::Iter<'a, Id, Id>,
     items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
 
-/// Mutably iterates the values of an [`ErasedHashMap`], read as `T`.
 pub struct ErasedHashMapIterMut<'a, T> {
     id_iter: hash_map::Iter<'a, Id, Id>,
     items: &'a ErasedVec,
@@ -128,7 +117,6 @@ impl ErasedBox {
         }
     }
 
-    /// Moves `value` onto the heap, recording how to clone it.
     #[inline]
     pub fn new_clone<T: Clone + 'static>(value: T) -> Self {
         let mut erased = Self::new(value);
@@ -137,15 +125,12 @@ impl ErasedBox {
         erased
     }
 
-    /// Borrows the value as `T`.
     #[inline]
     pub fn cast<T: 'static>(&self) -> &T {
         debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &*(self.ptr as *const T) }
     }
 
-    /// Borrows the value as `T`.
-    ///
     /// Takes `&self` because the storage is already reached through a shared
     /// reference elsewhere in the ECS; the caller is responsible for not
     /// creating two mutable borrows of the same value.
@@ -173,7 +158,6 @@ impl Drop for ErasedVec {
 }
 
 impl ErasedVec {
-    /// Creates an empty vector whose elements have the layout of `T`.
     #[inline]
     pub fn new<T>() -> Self {
         let len = unsafe { alloc::alloc(Layout::new::<usize>()) } as *mut usize;
@@ -196,13 +180,11 @@ impl ErasedVec {
         }
     }
 
-    /// The number of elements currently stored.
     #[inline]
     const fn len(&self) -> usize {
         unsafe { *self.len }
     }
 
-    /// Reserves room for `additional` more elements.
     #[inline]
     fn reserve(&self, additional: usize) {
         unsafe {
@@ -210,7 +192,6 @@ impl ErasedVec {
         }
     }
 
-    /// Sets the element count, adjusting the byte length of `data` to match.
     #[inline]
     fn set_len(&self, new_len: usize) {
         unsafe {
@@ -232,15 +213,12 @@ impl ErasedVec {
         unsafe { (*self.data.get()).as_mut_ptr().add(offset) as *mut T }
     }
 
-    /// Borrows the element at `idx`.
     #[inline]
     pub fn get<T>(&self, idx: usize) -> &T {
         debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &*self.get_ptr(idx) }
     }
 
-    /// Mutable access to the element at `idx`.
-    ///
     /// Takes `&self` for the same reason as [`ErasedBox::cast_mut`].
     #[inline]
     pub fn get_mut<T>(&self, idx: usize) -> &mut T {
@@ -248,7 +226,6 @@ impl ErasedVec {
         unsafe { &mut *self.get_mut_ptr(idx) }
     }
 
-    /// Inserts `item` at `idx`, shifting the following elements up by one.
     #[inline]
     pub fn insert<T>(&mut self, idx: usize, item: T) {
         debug_assert_eq!(self.layout, Layout::new::<T>());
@@ -264,7 +241,6 @@ impl ErasedVec {
         }
     }
 
-    /// Appends `item`.
     #[inline]
     pub fn push<T>(&mut self, item: T) {
         debug_assert_eq!(self.layout, Layout::new::<T>());
@@ -291,8 +267,6 @@ impl ErasedVec {
         self.set_len(self.len() + 1);
     }
 
-    /// Removes the element at `idx` and returns it, moving the last element into
-    /// the freed slot.
     #[inline]
     pub fn swap_remove<T>(&mut self, idx: usize) -> T {
         debug_assert_eq!(self.layout, Layout::new::<T>());
@@ -306,8 +280,6 @@ impl ErasedVec {
         }
     }
 
-    /// Removes the element at `idx` and drops it, moving the last element into
-    /// the freed slot.
     #[inline]
     pub fn swap_remove_and_drop(&mut self, idx: usize) {
         debug_assert!(idx < self.len());
@@ -341,7 +313,6 @@ impl ErasedVec {
         }
     }
 
-    /// Drops every element and releases the backing storage.
     #[inline]
     pub fn clear(&mut self) {
         if let Some(drop) = self.drop {
@@ -368,7 +339,6 @@ impl ErasedVec {
 }
 
 impl ErasedDenseMap {
-    /// Creates an empty map whose values have the layout of `T`.
     #[inline]
     pub fn new<T>() -> Self {
         Self {
@@ -448,7 +418,6 @@ impl ErasedDenseMap {
         }
     }
 
-    /// Removes the value stored for `id`.
     #[inline]
     pub fn remove<T>(&mut self, id: Id) -> Option<T> {
         match self.ids.find(id) {
@@ -460,7 +429,6 @@ impl ErasedDenseMap {
         }
     }
 
-    /// Removes and drops the value stored for `id`.
     #[inline]
     pub fn remove_and_drop(&mut self, id: Id) {
         if let Some(idx) = self.ids.find(id) {
@@ -471,7 +439,6 @@ impl ErasedDenseMap {
 }
 
 impl ErasedHashMap {
-    /// Creates an empty map whose values have the layout of `T`.
     #[inline]
     pub fn new<T>() -> Self {
         Self {
@@ -551,8 +518,6 @@ impl ErasedHashMap {
         }
     }
 
-    /// Removes the value stored for `id`.
-    ///
     /// The value is swapped with the last one, so the id of the moved value has
     /// to be updated to its new index.
     #[inline]
@@ -573,7 +538,6 @@ impl ErasedHashMap {
         }
     }
 
-    /// Removes and drops the value stored for `id`.
     #[inline]
     pub fn remove_and_drop(&mut self, id: Id) {
         if let Some(&idx) = self.ids.get(&id) {

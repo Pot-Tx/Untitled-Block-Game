@@ -1,4 +1,5 @@
 use crate::actor::*;
+use crate::{by_name, id_of};
 use crate::components;
 use crate::ecs::*;
 use crate::game::*;
@@ -6,18 +7,32 @@ use crate::render::*;
 use crate::util::bounding::{AABBGroup, Ray};
 use crate::util::coord::{Direction, ICoord3};
 use crate::util::Id;
-use crate::world::{Block, BlockPos, World};
+use crate::world::{BLOCK_TYPES, Block, BlockPos, World};
 use glam::Vec3;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use wgpu::{LoadOp, PrimitiveTopology};
 
 components! {
-    /// Marks the actor the player steers.
+    /// Marks the actor the player steers, together with what it is looking at
+    /// and what an interaction would affect.
     #[derive(Clone, Copy)]
-    pub struct PlayerControlled: Cold;
+    pub struct PlayerControlled { pub selection: Option<SelectedItem> }: Cold, data;
+}
 
-    /// What the player is looking at, and what an interaction would affect.
-    #[derive(Clone, Copy)]
-    pub struct Selection(Option<SelectedItem>): Cold;
+/// The selection is derived from the world every tick, so it is not written; an
+/// actor read from data starts out looking at nothing.
+impl Serialize for PlayerControlled {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_unit()
+    }
+}
+
+impl<'de> Deserialize<'de> for PlayerControlled {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let () = Deserialize::deserialize(deserializer)?;
+
+        Ok(Self { selection: None })
+    }
 }
 
 /// The thing the player points at.
@@ -64,19 +79,19 @@ impl SelectedItem {
 }
 
 /// Turns the movement and jump actions into velocity.
-pub struct PlayerController;
+pub(super) struct PlayerController;
 
 /// Turns the mouse motion into the rotation of the player.
-pub struct PlayerRotator;
+pub(super) struct PlayerRotator;
 
 /// Shoots a ray through the world and stores what the player looks at.
-pub struct Selector;
+pub(super) struct Selector;
 
 /// Breaks and places blocks when the attack and interact actions are pressed.
-pub struct Interactor;
+pub(super) struct Interactor;
 
 /// Draws the outline of the current selection.
-pub struct SelectionRenderer {
+pub(super) struct SelectionRenderer {
     desc: RenderDescriptor<'static>,
     batch: RenderBatch<Transformation, BasicVertex, TransInst>,
     vertices: BufferVec<BasicVertex>,
@@ -91,7 +106,7 @@ impl System for PlayerController {
         CompRead<Rotation>,
         CompRead<Speed>,
         OptionalRead<Flight>,
-        OptionalRead<Contact>,
+        OptionalRead<Bound>,
     );
     type ResQuery = ResRead<InputState>;
 
@@ -103,22 +118,19 @@ impl System for PlayerController {
         if res.cursor_grabbed {
             let mut dir = Vec3::ZERO;
 
-            // The ids are the entries of `INPUT_MAP`: 1 forward, 2 left,
-            // 3 backward, 4 right, 5 ascend, 6 descend, 7 attack and
-            // 8 interact.
-            if res.is_action_present(1) {
+            if res.is_input_present(by_name!(INPUT_MAP, "forward")) {
                 dir.z += 1.0;
             }
 
-            if res.is_action_present(2) {
+            if res.is_input_present(by_name!(INPUT_MAP, "left")) {
                 dir.x -= 1.0;
             }
 
-            if res.is_action_present(3) {
+            if res.is_input_present(by_name!(INPUT_MAP, "backward")) {
                 dir.z -= 1.0;
             }
 
-            if res.is_action_present(4) {
+            if res.is_input_present(by_name!(INPUT_MAP, "right")) {
                 dir.x += 1.0;
             }
 
@@ -128,11 +140,11 @@ impl System for PlayerController {
                 // speed is reduced in every other case, which keeps the player
                 // from drifting sideways in the air.
                 None => {
-                    if let Some(contact) = entry.6 {
-                        if let Some(p) = contact.0[Axis::Y.idx()]
+                    if let Some(bound) = entry.6 {
+                        if let Some(p) = bound.contact[Axis::Y.idx()]
                             && !p
                         {
-                            if res.is_action_present(5) {
+                            if res.is_input_present(by_name!(INPUT_MAP, "ascend")) {
                                 entry.2.0.y = 0.75;
                             }
                         } else {
@@ -142,11 +154,11 @@ impl System for PlayerController {
                 }
 
                 Some(_) => {
-                    if res.is_action_present(5) {
+                    if res.is_input_present(by_name!(INPUT_MAP, "ascend")) {
                         dir.y += 1.0;
                     }
 
-                    if res.is_action_present(6) {
+                    if res.is_input_present(by_name!(INPUT_MAP, "descend")) {
                         dir.y -= 1.0;
                     }
                 }
@@ -177,7 +189,11 @@ impl System for PlayerRotator {
 }
 
 impl System for Selector {
-    type CompQuery = (CompWrite<Selection>, CompRead<Position>, CompRead<Rotation>);
+    type CompQuery = (
+        CompWrite<PlayerControlled>,
+        CompRead<Position>,
+        CompRead<Rotation>,
+    );
     type ResQuery = ResRead<World>;
 
     fn operate(
@@ -186,24 +202,19 @@ impl System for Selector {
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
         let ray = Ray {
-            origin: entry.2.0,
+            origin: entry.2.cur,
             direction: entry.3.direction(),
         };
 
         // The player can only reach a few blocks.
-        entry.1.0 = ray.traverse(res, 8.0);
+        entry.1.selection = ray.traverse(res, 8.0);
 
         None
     }
 }
 
 impl System for Interactor {
-    type CompQuery = (
-        CompRead<PlayerControlled>,
-        CompRead<Selection>,
-        CompRead<Position>,
-        CompRead<Bound>,
-    );
+    type CompQuery = (CompRead<PlayerControlled>, CompRead<Position>, CompRead<Bound>);
     type ResQuery = (ResRead<InputState>, ResWrite<World>);
 
     fn operate(
@@ -215,8 +226,8 @@ impl System for Interactor {
             return None;
         }
 
-        if let Some(selected) = entry.2.0 {
-            if res.0.is_action_present(7) {
+        if let Some(selected) = entry.1.selection {
+            if res.0.is_input_present(by_name!(INPUT_MAP, "attack")) {
                 match selected {
                     // Breaking a block replaces it with air.
                     SelectedItem::Block { pos, .. } => {
@@ -227,20 +238,20 @@ impl System for Interactor {
                 }
             }
 
-            if res.0.is_action_present(8) {
+            if res.0.is_input_present(by_name!(INPUT_MAP, "interact")) {
                 match selected {
                     // Placing a block needs the face the ray entered through,
                     // and it has to be free of the player's own collision box.
                     SelectedItem::Block { pos, face, .. } => {
-                        let block = Block::default_of(1);
-                        let bound = entry.4.translate(entry.3);
+                        let block = Block::default_of(id_of!(BLOCK_TYPES, "bricks"));
+                        let bound = entry.3.translate(entry.2);
 
                         if block
                             .bounds(pos.step(face))
                             .into_iter()
                             .all(|b| !bound.intersects_with(b))
                         {
-                            res.1.set_block(pos.step(face), Block::default_of(1));
+                            res.1.set_block(pos.step(face), block);
                         }
                     }
 
@@ -254,7 +265,7 @@ impl System for Interactor {
 }
 
 impl System for SelectionRenderer {
-    type CompQuery = CompRead<Selection>;
+    type CompQuery = CompRead<PlayerControlled>;
     type ResQuery = (ResWrite<Option<Frame>>, ResRead<Camera>, ResRead<Canvas>);
 
     fn operate(
@@ -264,7 +275,7 @@ impl System for SelectionRenderer {
     ) -> Option<Vec<Command>> {
         let canvas = res.2;
 
-        match entry.1.0 {
+        match entry.1.selection {
             Some(item) => {
                 let mesh = item.mesh();
                 self.vertices.set_content(canvas, &mesh.vertices);

@@ -1,17 +1,31 @@
 use crate::ecs::*;
 use crate::util::erasure::*;
-use std::any::TypeId;
+use bimap::BiMap;
+use log::error;
+use std::any::{type_name, TypeId};
 use std::collections::HashMap;
 
-/// Declares components and registers them with the ECS.
-///
-/// Every component is written as
-/// `#[attributes] pub struct Name { ... }: StorageType;`, followed by a
-/// semicolon, and the macro implements [`Component`] with the given storage
-/// type for it.
 #[macro_export]
 macro_rules! components {
     () => {};
+
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident ( $($ty:ty),* $(,)? ): $storage:ident, data;
+        $($rest:tt)*
+    ) => {
+        $(#[$attr])*
+        $vis struct $name($(pub $ty),*);
+
+        impl $crate::ecs::Component for $name {
+            const SETTINGS: $crate::ecs::ComponentSettings = $crate::ecs::ComponentSettings {
+                storage: $crate::ecs::StorageType::$storage,
+                asset: Some($crate::ecs::asset_of_component::<$name>()),
+            };
+        }
+
+        $crate::components! { $($rest)* }
+    };
 
     (
         $(#[$attr:meta])*
@@ -22,7 +36,28 @@ macro_rules! components {
         $vis struct $name($(pub $ty),*);
 
         impl $crate::ecs::Component for $name {
-            const STORAGE_TYPE: $crate::ecs::StorageType = $crate::ecs::StorageType::$storage;
+            const SETTINGS: $crate::ecs::ComponentSettings = $crate::ecs::ComponentSettings {
+                storage: $crate::ecs::StorageType::$storage,
+                asset: None,
+            };
+        }
+
+        $crate::components! { $($rest)* }
+    };
+
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident { $($fvis:vis $fname:ident : $fty:ty),* $(,)? }: $storage:ident, data;
+        $($rest:tt)*
+    ) => {
+        $(#[$attr])*
+        $vis struct $name { $($fvis $fname : $fty),* }
+
+        impl $crate::ecs::Component for $name {
+            const SETTINGS: $crate::ecs::ComponentSettings = $crate::ecs::ComponentSettings {
+                storage: $crate::ecs::StorageType::$storage,
+                asset: Some($crate::ecs::asset_of_component::<$name>()),
+            };
         }
 
         $crate::components! { $($rest)* }
@@ -37,7 +72,28 @@ macro_rules! components {
         $vis struct $name { $($fvis $fname : $fty),* }
 
         impl $crate::ecs::Component for $name {
-            const STORAGE_TYPE: $crate::ecs::StorageType = $crate::ecs::StorageType::$storage;
+            const SETTINGS: $crate::ecs::ComponentSettings = $crate::ecs::ComponentSettings {
+                storage: $crate::ecs::StorageType::$storage,
+                asset: None,
+            };
+        }
+
+        $crate::components! { $($rest)* }
+    };
+
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident: $storage:ident, data;
+        $($rest:tt)*
+    ) => {
+        $(#[$attr])*
+        $vis struct $name;
+
+        impl $crate::ecs::Component for $name {
+            const SETTINGS: $crate::ecs::ComponentSettings = $crate::ecs::ComponentSettings {
+                storage: $crate::ecs::StorageType::$storage,
+                asset: Some($crate::ecs::asset_of_component::<$name>()),
+            };
         }
 
         $crate::components! { $($rest)* }
@@ -52,7 +108,10 @@ macro_rules! components {
         $vis struct $name;
 
         impl $crate::ecs::Component for $name {
-            const STORAGE_TYPE: $crate::ecs::StorageType = $crate::ecs::StorageType::$storage;
+            const SETTINGS: $crate::ecs::ComponentSettings = $crate::ecs::ComponentSettings {
+                storage: $crate::ecs::StorageType::$storage,
+                asset: None,
+            };
         }
 
         $crate::components! { $($rest)* }
@@ -64,7 +123,7 @@ enum ComponentStorage {
     Hash(ErasedHashMap),
 }
 
-/// How the values of a component are stored.
+#[derive(Clone, Copy, Debug)]
 pub enum StorageType {
     /// Dense storage, for components that most entities have.
     Hot,
@@ -72,30 +131,33 @@ pub enum StorageType {
     Cold,
 }
 
-/// A value that can be attached to entities.
-pub trait Component: Sync + Send + 'static {
-    const STORAGE_TYPE: StorageType;
+#[derive(Clone, Copy, Debug)]
+pub struct ComponentSettings {
+    pub storage: StorageType,
+    pub asset: Option<Asset>,
 }
 
-/// The type erased storage of a single component, for every entity.
+pub trait Component: Clone + Sync + Send + 'static {
+    const SETTINGS: ComponentSettings;
+}
+
 pub struct ErasedComponent {
-    id: TypeId,
+    pub id: TypeId,
     storage: ComponentStorage,
+    pub settings: &'static ComponentSettings,
 }
 
-/// The type erased storage of every registered component.
 #[derive(Default)]
 pub struct ComponentManager {
     components: HashMap<TypeId, ErasedComponent>,
+    names: BiMap<TypeId, &'static str>,
 }
 
-/// Iterates the values of a component storage, read as `C`.
 pub enum ComponentIter<'a, C> {
     Dense(ErasedDenseMapIter<'a, C>),
     Hash(ErasedHashMapIter<'a, C>),
 }
 
-/// Mutably iterates the values of a component storage, read as `C`.
 pub enum ComponentIterMut<'a, C> {
     Dense(ErasedDenseMapIterMut<'a, C>),
     Hash(ErasedHashMapIterMut<'a, C>),
@@ -112,75 +174,85 @@ impl ComponentManager {
         Self::default()
     }
 
-    /// Allocates the storage of `C`, whose values can be inserted afterwards.
-    pub fn register<C: Component>(&mut self) {
+    pub fn register<C: Component>(&mut self, name: &'static str) {
         let id = TypeId::of::<C>();
+
+        if let Some(taken) = self.names.get_by_right(name)
+            && *taken != id
+        {
+            error!("component name {} is already used by another component", name);
+        }
+
+        self.names.insert(id, name);
         self.components.insert(
             id,
             ErasedComponent {
                 id,
-                storage: match C::STORAGE_TYPE {
+                storage: match C::SETTINGS.storage {
                     StorageType::Hot => ComponentStorage::Dense(ErasedDenseMap::new::<C>()),
                     StorageType::Cold => ComponentStorage::Hash(ErasedHashMap::new::<C>()),
                 },
+                settings: &C::SETTINGS,
             },
         );
     }
 
-    /// The storage of the component with `id`.
     #[inline]
-    pub fn by_id(&self, id: TypeId) -> &ErasedComponent {
+    pub fn id_of(&self, name: &str) -> Option<TypeId> {
+        self.names.get_by_right(name).copied()
+    }
+
+    #[inline]
+    pub fn name_of(&self, id: TypeId) -> Option<&'static str> {
+        self.names.get_by_left(&id).copied()
+    }
+    
+    #[inline]
+    pub fn by_id(&self, id: TypeId) -> Result<&ErasedComponent, QueryError> {
         self.components
             .get(&id)
-            .unwrap_or_else(|| panic!("component with id {:?} not found", id))
+            .ok_or(QueryError::MissingComponentId(id))
     }
 
-    /// Mutable access to the storage of the component with `id`.
     #[inline]
-    pub fn by_id_mut(&mut self, id: TypeId) -> &mut ErasedComponent {
-        self.components
-            .get_mut(&id)
-            .unwrap_or_else(|| panic!("component with id {:?} not found", id))
-    }
-
-    /// Mutable access to the storage of the component with `id`, which has to be
-    /// registered.
-    #[inline]
-    pub fn try_by_id_mut(&mut self, id: TypeId) -> Result<&mut ErasedComponent, QueryError> {
+    pub fn by_id_mut(&mut self, id: TypeId) -> Result<&mut ErasedComponent, QueryError> {
         self.components
             .get_mut(&id)
             .ok_or(QueryError::MissingComponentId(id))
     }
-
-    /// The storage of `C`.
+    
     #[inline]
-    pub fn get<C: Component>(&self) -> &ErasedComponent {
-        self.by_id(TypeId::of::<C>())
+    pub fn by_name(&self, name: &str) -> Result<&ErasedComponent, QueryError> {
+        let id = self.names.get_by_right(name).ok_or(QueryError::MissingComponentName(name.into()))?;
+        
+        self.components
+            .get(id)
+            .ok_or_else(move || QueryError::MissingComponentId(*id))
+    }
+    
+    #[inline]
+    pub fn by_name_mut(&mut self, name: &str) -> Result<&mut ErasedComponent, QueryError> {
+        let id = self.names.get_by_right(name).ok_or(QueryError::MissingComponentName(name.into()))?;
+        
+        self.components
+            .get_mut(id)
+            .ok_or_else(|| QueryError::MissingComponentId(*id))
     }
 
-    /// The storage of `C`, which has to be registered.
     #[inline]
-    pub fn try_get<C: Component>(&self) -> Result<&ErasedComponent, QueryError> {
+    pub fn get<C: Component>(&self) -> Result<&ErasedComponent, QueryError> {
         self.components
             .get(&TypeId::of::<C>())
-            .ok_or_else(QueryError::component::<C>)
+            .ok_or_else(|| QueryError::MissingComponent(type_name::<C>()))
     }
 
-    /// Mutable access to the storage of `C`.
     #[inline]
-    pub fn get_mut<C: Component>(&mut self) -> &mut ErasedComponent {
-        self.by_id_mut(TypeId::of::<C>())
-    }
-
-    /// Mutable access to the storage of `C`, which has to be registered.
-    #[inline]
-    pub fn try_get_mut<C: Component>(&mut self) -> Result<&mut ErasedComponent, QueryError> {
+    pub fn get_mut<C: Component>(&mut self) -> Result<&mut ErasedComponent, QueryError> {
         self.components
             .get_mut(&TypeId::of::<C>())
-            .ok_or_else(QueryError::component::<C>)
+            .ok_or_else(|| QueryError::MissingComponent(type_name::<C>()))
     }
 
-    /// Removes the components of `entity` from every registered storage.
     pub fn remove_all(&mut self, entity: Id) {
         self.components.iter_mut().for_each(|(_, c)| {
             c.remove_and_drop(entity);
@@ -189,7 +261,6 @@ impl ComponentManager {
 }
 
 impl ErasedComponent {
-    /// Returns whether `entity` has a value in this storage.
     #[inline]
     pub fn contains(&self, entity: Id) -> bool {
         match &self.storage {
@@ -198,7 +269,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Borrows the value of `entity` as `C`.
     #[inline]
     pub fn get<C: Component>(&self, entity: Id) -> Option<&C> {
         debug_assert_eq!(self.id, TypeId::of::<C>());
@@ -208,8 +278,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Borrows the value of `entity` as `C`.
-    ///
     /// Takes `&self` because queries hand out one mutable borrow per entity
     /// while sharing the storage among all of them; see
     /// [`ErasedBox::cast_mut`](crate::util::erasure::ErasedBox::cast_mut).
@@ -222,7 +290,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Iterates every entity that has a value in this storage.
     pub fn iter<C: Component>(&self) -> ComponentIter<'_, C> {
         debug_assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
@@ -231,7 +298,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Mutably iterates every entity that has a value in this storage.
     pub fn iter_mut<C: Component>(&self) -> ComponentIterMut<'_, C> {
         debug_assert_eq!(self.id, TypeId::of::<C>());
         match &self.storage {
@@ -240,7 +306,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Sets the value of `entity`, returning the previous value.
     #[inline]
     pub fn insert<C: Component>(&mut self, entity: Id, value: C) -> Option<C> {
         debug_assert_eq!(self.id, TypeId::of::<C>());
@@ -260,7 +325,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Removes the value of `entity` and returns it.
     #[inline]
     pub fn remove<C: Component>(&mut self, entity: Id) -> Option<C> {
         match &mut self.storage {
@@ -269,7 +333,6 @@ impl ErasedComponent {
         }
     }
 
-    /// Removes and drops the value of `entity`.
     #[inline]
     pub fn remove_and_drop(&mut self, entity: Id) {
         match &mut self.storage {
@@ -298,5 +361,16 @@ impl<'a, C: 'a> Iterator for ComponentIterMut<'a, C> {
             ComponentIterMut::Dense(it) => it.next(),
             ComponentIterMut::Hash(it) => it.next(),
         }
+    }
+}
+
+pub const fn asset_of_component<C: Component + DeserializeOwned + Serialize>() -> Asset {
+    Asset {
+        read: |raw| Ok(ErasedBox::new_clone(
+            ASSET_OPTIONS.from_str::<C>(raw.get_ron())?,
+        )),
+        write: |value| Ok(RawValue::from_boxed_ron(
+            ASSET_OPTIONS.to_string(value.cast::<C>())?.into_boxed_str()
+        )?),
     }
 }

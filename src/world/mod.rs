@@ -10,12 +10,9 @@ mod generation;
 mod model;
 mod region;
 
-use crate::actor::{PlayerControlled, Position, PrevPos, Rotation};
+use crate::actor::{PlayerControlled, Position, Rotation};
 use crate::ecs::*;
-use crate::render::{
-    AlphaVertex, Camera, Canvas, Frame, FromConfig, IntTransInst, NormTexVertex, RenderBatch,
-    RenderBatchConfig, RenderDescriptor, TextureArraySampler, Transformation,
-};
+use crate::render::*;
 use crate::resources;
 use crate::util::bounding::{PlaneGroup, AABB};
 use crate::util::collection::Volume;
@@ -47,6 +44,37 @@ pub const LOD_COUNT: usize = MAX_LOD as usize + 1;
 /// How often the changed regions are written to disk.
 static SAVE_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_mins(5));
 
+/// Registers the resources and the systems of the voxel world.
+pub(crate) fn register(tick: &mut SystemManager, resources: &mut ResourceManager) {
+    load_blocks();
+
+    resources.register("gravity", Gravity(0.125));
+
+    tick.register(6, "world_updater", WorldUpdater);
+    tick.register(7, "chunk_meshing", ChunkMeshing);
+}
+
+/// Registers the resources and the systems of the world that need a canvas.
+pub(crate) fn register_canvas(
+    resources: &mut ResourceManager,
+    frame: &mut SystemManager,
+    canvas: &Canvas,
+) {
+    resources.register(
+        "block_textures",
+        BlockTextures(BLOCK_TEXTURES.create_texture_sampler(canvas, "block", true)),
+    );
+
+    frame.register(3, "world_renderer", WorldRenderer::new(canvas));
+}
+
+/// Loads the templates, the textures and the types of the blocks.
+fn load_blocks() {
+    BLOCK_MODEL_TEMPLATES.init(build_block_model_templates());
+    BLOCK_TEXTURES.init(build_block_textures());
+    BLOCK_TYPES.init(build_block_types());
+}
+
 /// A sliding window onto a larger grid.
 ///
 /// Positions are mapped into a volume of `2 * radius + 1` entries by wrapping
@@ -58,7 +86,6 @@ pub struct RingVolume<T: Clone> {
 }
 
 impl<T: Clone> RingVolume<T> {
-    /// Creates an empty volume covering the region cube around `center`.
     pub fn new(center: IVec3, radius: u8) -> Self {
         Self {
             volume: Volume::new(U8Vec3::splat(radius * 2 + 1)),
@@ -84,7 +111,6 @@ impl<T: Clone> RingVolume<T> {
         }
     }
 
-    /// Mutable access to the value stored for `pos`.
     pub fn get_mut(&mut self, pos: IVec3) -> Option<&mut T> {
         if self.bound.is_point_inside(pos) {
             self.volume.get_mut(self.cast_pos(pos)).as_mut()
@@ -93,7 +119,6 @@ impl<T: Clone> RingVolume<T> {
         }
     }
 
-    /// Stores `value` for `pos`, returning the value that was there before.
     pub fn set(&mut self, pos: IVec3, value: T) -> Option<T> {
         if self.bound.is_point_inside(pos) {
             self.volume.set(self.cast_pos(pos), Some(value))
@@ -102,7 +127,6 @@ impl<T: Clone> RingVolume<T> {
         }
     }
 
-    /// Moves the window by `dpos`, clearing the entries that fall outside it.
     pub fn translate(&mut self, dpos: IVec3) {
         let new_bound = self.bound.translate(dpos);
 
@@ -137,7 +161,6 @@ impl<T: Clone> RingVolume<T> {
     }
 }
 
-/// The regions around the player, with the state of their loading and meshing.
 pub struct World {
     /// Outer radius of each level of detail, ordered from the finest level to
     /// the coarsest one.
@@ -150,7 +173,6 @@ pub struct World {
     regions: RingVolume<Region>,
     generating_regions: HashSet<RegionPos>,
     meshing_regions: HashSet<RegionPos>,
-    /// The regions that have to be written back to disk on the next save.
     changed_regions: HashSet<RegionPos>,
     save_timer: Instant,
 
@@ -205,8 +227,6 @@ impl World {
         }
     }
 
-    /// Splits a block position into the region it belongs to and the position
-    /// inside that region.
     #[inline]
     pub fn cast_pos(pos: BlockPos) -> (RegionPos, LocalPos) {
         let region_size = IVec3::splat(REGION_SIZE as i32);
@@ -215,9 +235,6 @@ impl World {
         (region_pos, rel_block_pos)
     }
 
-    /// The regions whose chunk has to be remeshed when the block at `pos`
-    /// changes.
-    ///
     /// A block on the border of a region is part of the halo of its neighbours,
     /// so up to eight regions are influenced by a single change.
     #[inline]
@@ -255,7 +272,6 @@ impl World {
         }
     }
 
-    /// Sets the block at `pos` and queues the affected regions for remeshing.
     pub fn set_block(&mut self, pos: BlockPos, block: Block) {
         let (region_pos, rel_block_pos) = Self::cast_pos(pos);
         for influenced_region_pos in Self::pos_influence(pos) {
@@ -275,9 +291,6 @@ impl World {
         }
     }
 
-    /// Follows the player, fills in the levels of detail around the new centre
-    /// and polls the regions that are still being generated.
-    ///
     /// The work per call is bounded by `MAX_UPDATE_COST`, so a fast player
     /// spreads the loading of new regions over several ticks.
     pub fn update(&mut self, canvas: &Canvas, center: RegionPos, translation: IVec3) {
@@ -385,7 +398,6 @@ impl World {
         }
     }
 
-    /// Uploads the meshes of the regions that finished meshing.
     pub fn pre_render(&mut self, canvas: &Canvas) {
         self.meshing_regions.retain(|&pos| {
             if let Some(region) = self.regions.get_mut(pos) {
@@ -396,7 +408,6 @@ impl World {
         });
     }
 
-    /// Writes every region that changed since the last save back to disk.
     pub fn save(&mut self) {
         for pos in self.changed_regions.drain() {
             if let Some(region) = self.regions.get_mut(pos)
@@ -414,14 +425,12 @@ resources! {
     pub struct WorldThreads(ThreadPool, ThreadPool);
 }
 
-/// Follows the player with the world and with the generator.
-pub struct WorldUpdater;
+struct WorldUpdater;
 
 impl System for WorldUpdater {
     type CompQuery = (
         CompRead<PlayerControlled>,
         CompRead<Position>,
-        CompRead<PrevPos>,
     );
     type ResQuery = (
         ResWrite<World>,
@@ -435,9 +444,9 @@ impl System for WorldUpdater {
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        let pos = entry.2.0.floor().as_ivec3();
+        let pos = entry.2.cur.floor().as_ivec3();
         let center = pos.div_euclid(IVec3::splat(REGION_SIZE as i32));
-        let prev_pos = entry.3.0.floor().as_ivec3();
+        let prev_pos = entry.2.prev.floor().as_ivec3();
         let translation = center - prev_pos.div_euclid(IVec3::splat(REGION_SIZE as i32));
 
         res.0.update(res.2, center, translation);
@@ -447,8 +456,7 @@ impl System for WorldUpdater {
     }
 }
 
-/// Draws the blocks and the occlusion mesh of every visible region.
-pub struct WorldRenderer {
+struct WorldRenderer {
     block_desc: RenderDescriptor<'static>,
     block_batch: RenderBatch<(TextureArraySampler, Transformation), NormTexVertex, IntTransInst>,
 
@@ -513,7 +521,6 @@ impl System for WorldRenderer {
 }
 
 impl WorldRenderer {
-    /// Creates the pipelines of the block and the occlusion pass.
     pub fn new(canvas: &Canvas) -> Self {
         Self {
             block_desc: RenderDescriptor {

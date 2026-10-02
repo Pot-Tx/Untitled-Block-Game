@@ -88,61 +88,30 @@ impl<'a, R: BindRes> BindContent<'a> for &'a R {
     }
 }
 
-impl<'a, R: BindRes, S: BindRes> BindContent<'a> for (&'a R, &'a S) {
-    fn to_bindings(&self) -> Vec<BindGroupEntry<'a>> {
-        vec![
-            BindGroupEntry {
-                binding: 0,
-                resource: self.0.as_resource(),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: self.1.as_resource(),
-            },
-        ]
-    }
+/// Implements [`BindContent`] for a tuple of resources, which become the
+/// bindings `0` to `n - 1` of the bind group.
+///
+/// Every resource is written as the pair of its type and the name its value is
+/// bound to.
+macro_rules! impl_bind_content {
+    ($($res:ident($var:ident)),+ $(,)?) => {
+        impl<'a, $($res: BindRes),+> BindContent<'a> for ($(&'a $res,)+) {
+            fn to_bindings(&self) -> Vec<BindGroupEntry<'a>> {
+                let ($($var,)+) = *self;
+
+                [$($var.as_resource(),)+]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(binding, resource)| BindGroupEntry {
+                        binding: binding as u32,
+                        resource,
+                    })
+                    .collect()
+            }
+        }
+    };
 }
 
-impl<'a, R: BindRes, S: BindRes, T: BindRes> BindContent<'a> for (&'a R, &'a S, &'a T) {
-    fn to_bindings(&self) -> Vec<BindGroupEntry<'a>> {
-        vec![
-            BindGroupEntry {
-                binding: 0,
-                resource: self.0.as_resource(),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: self.1.as_resource(),
-            },
-            BindGroupEntry {
-                binding: 2,
-                resource: self.2.as_resource(),
-            },
-        ]
-    }
-}
-
-impl<'a, R: BindRes, S: BindRes, T: BindRes, U: BindRes> BindContent<'a>
-    for (&'a R, &'a S, &'a T, &'a U)
-{
-    fn to_bindings(&self) -> Vec<BindGroupEntry<'a>> {
-        vec![
-            BindGroupEntry {
-                binding: 0,
-                resource: self.0.as_resource(),
-            },
-            BindGroupEntry {
-                binding: 1,
-                resource: self.1.as_resource(),
-            },
-            BindGroupEntry {
-                binding: 2,
-                resource: self.2.as_resource(),
-            },
-            BindGroupEntry {
-                binding: 3,
-                resource: self.3.as_resource(),
-            },
-        ]
-    }
-}
+impl_bind_content!(R(r), S(s));
+impl_bind_content!(R(r), S(s), T(t));
+impl_bind_content!(R(r), S(s), T(t), U(u));

@@ -4,8 +4,8 @@ mod client;
 mod input;
 
 use crate::game::client::GameClient;
+use crate::ecs::{ResourceManager, SystemManager};
 use crate::resources;
-use anyhow::Result;
 use log::error;
 use std::backtrace::Backtrace;
 use std::panic;
@@ -17,13 +17,21 @@ use winit::event_loop::{ControlFlow, EventLoop};
 pub use input::*;
 
 /// Time between two simulation ticks.
-pub static TICK_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_millis(50));
+pub(crate) static TICK_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_millis(50));
 /// Shortest time between two frames.
-pub static FRAME_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_millis(5));
+pub(crate) static FRAME_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_millis(5));
 
 resources! {
     /// Whether an open screen pauses the game.
     pub struct Paused(bool);
+}
+
+/// Registers the resources and the systems of the game loop.
+pub(crate) fn register(frame: &mut SystemManager, resources: &mut ResourceManager) {
+    resources.register("input_state", InputState::new());
+    resources.register("paused", Paused(false));
+
+    frame.register(0, "cursor_applier", CursorApplier::new());
 }
 
 /// The game, which owns the client that drives the event loop.
@@ -33,12 +41,16 @@ pub struct Game {
 }
 
 impl Game {
-    /// Creates the game and the client that handles the window events.
+    /// Creates the game; everything it needs is registered by [`Self::init`].
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn init(&self) {}
+    /// Registers the components, the systems, the resources and the data of
+    /// the game, which the window is not needed for.
+    pub fn init(&mut self) {
+        self.client.setup();
+    }
 
     /// Runs the event loop of the window until it is closed.
     pub fn run(&mut self) -> Result<(), EventLoopError> {

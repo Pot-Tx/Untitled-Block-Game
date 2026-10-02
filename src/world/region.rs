@@ -1,6 +1,4 @@
-use crate::render::{
-    AlphaVertex, BufferInit, BufferVec, Canvas, IntTransInst, NormTexVertex, Render, RenderItem,
-};
+use crate::render::*;
 use crate::util::bounding::AABB;
 use crate::util::collection::Volume;
 use crate::util::SwapPair;
@@ -8,7 +6,7 @@ use crate::world::block::Meta;
 use crate::world::generation::*;
 use crate::world::model::MeshingTask;
 use crate::world::{Block, Chunk, MeshingResult, RegionPos};
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use crossbeam_channel::*;
 use glam::{U8Vec3, Vec3};
 use log::error;
@@ -33,12 +31,9 @@ pub const SUBREGION_COUNT: u8 = REGION_SIZE / SUBREGION_SIZE;
 /// block.
 pub const MAX_LOD: u8 = REGION_SIZE.ilog2() as u8;
 
-/// One region of the world: the blocks, the model it is drawn with, and the
-/// state of its loading, generation and meshing.
 #[derive(Clone)]
 pub struct Region {
     pos: RegionPos,
-    /// The level of detail the chunk is currently stored at.
     lod: u8,
     /// The blocks of the region, or `None` while it is still being generated.
     chunk: Option<Chunk>,
@@ -85,7 +80,6 @@ impl Region {
         SubRegionPos::new(1, 1, 1),
     ];
 
-    /// Creates a region, loading it from disk or starting its generation.
     pub fn new(
         canvas: &Canvas,
         pos: RegionPos,
@@ -137,9 +131,6 @@ impl Region {
         (REGION_SIZE >> lod) + 2
     }
 
-    /// The sub-regions whose chunk has to be remeshed when the block at `pos`
-    /// changes.
-    ///
     /// The mesher reads the blocks around a sub-region, so a block on the border
     /// also changes the mesh of the neighbouring sub-regions.
     #[inline]
@@ -169,7 +160,6 @@ impl Region {
         influenced
     }
 
-    /// The box the region covers, in world coordinates.
     pub fn bound(&self) -> AABB<Vec3> {
         AABB {
             min: (self.pos * REGION_SIZE as i32).as_vec3(),
@@ -186,9 +176,6 @@ impl Region {
         }
     }
 
-    /// Sets the block at `pos` and queues the affected sub-regions for
-    /// remeshing.
-    ///
     /// Returns whether the region has a chunk to write to.
     pub fn set_block(&mut self, pos: LocalPos, block: Block) -> bool {
         match &mut self.chunk {
@@ -203,7 +190,6 @@ impl Region {
         }
     }
 
-    /// Asks the generator for the chunk of this region.
     fn begin_generation(&mut self) {
         match self.gen_tx.try_send(GenTask {
             pos: self.pos,
@@ -222,8 +208,6 @@ impl Region {
         }
     }
 
-    /// Asks the mesher for the meshes of `poses`.
-    ///
     /// At level 0 every sub-region is meshed on its own, so that a change only
     /// remeshes the sub-regions around it. Coarser levels collapse the region
     /// into a few blocks, so the whole region is meshed in one task.
@@ -268,8 +252,6 @@ impl Region {
         }
     }
 
-    /// Switches the region to `lod`, restarting its generation.
-    ///
     /// Returns whether the level changed; a region that has been edited by the
     /// player keeps its blocks and is never regenerated at another level.
     pub fn update(&mut self, lod: u8) -> bool {
@@ -282,8 +264,6 @@ impl Region {
         }
     }
 
-    /// Takes the generated chunk when it arrived and starts meshing it.
-    ///
     /// Returns whether the region has its chunk, so that the world can stop
     /// polling it.
     pub fn poll(&mut self) -> bool {
@@ -303,8 +283,6 @@ impl Region {
         }
     }
 
-    /// Uploads the meshes that finished and reports whether the model is ready
-    /// to be drawn at the level of detail of the region.
     pub fn pre_render(&mut self, canvas: &Canvas) -> bool {
         if self.meshing > 0 {
             for result in self.mesh_rx.try_iter() {
@@ -322,7 +300,7 @@ impl Region {
     ///
     /// The file holds a magic, the version of the format, and then the blocks
     /// run length encoded as a meta value followed by how often it repeats.
-    pub fn save(&mut self) -> Result<()> {
+    pub fn save(&mut self) -> anyhow::Result<()> {
         if let Some(changed) = self.changed
             && changed
         {
@@ -371,8 +349,7 @@ impl Region {
         Ok(())
     }
 
-    /// Reads the chunk back from `saves/<x>.<y>.<z>.regn`.
-    pub fn load(&mut self) -> Result<()> {
+    pub fn load(&mut self) -> anyhow::Result<()> {
         let mut file = File::open(format!(
             "saves/{}.{}.{}.regn",
             self.pos.x, self.pos.y, self.pos.z
@@ -423,8 +400,6 @@ impl Region {
     }
 }
 
-/// The meshes of one region.
-///
 /// At level 0 the region holds one entry per sub-region, above that a single
 /// entry for the whole region. Both are kept around while one of them is being
 /// replaced, so that the mesh does not pop when a region changes its level of
@@ -437,7 +412,6 @@ pub struct RegionModel {
     on_far: bool,
 }
 
-/// The buffers of one meshed chunk: the blocks and the occlusion mesh.
 #[derive(Clone)]
 pub struct ChunkModel {
     block_vertices: BufferVec<NormTexVertex>,
@@ -522,7 +496,6 @@ impl Render<AlphaVertex, IntTransInst> for RegionModel {
 }
 
 impl RegionModel {
-    /// Creates the instance buffer that places the region in the world.
     fn new(canvas: &Canvas, pos: RegionPos, lod: u8) -> Self {
         Self {
             near: None,

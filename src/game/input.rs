@@ -2,21 +2,20 @@ use crate::ecs::*;
 use crate::game::client::WINDOW;
 use crate::ui::ActiveScreens;
 use crate::util::collection::Registry;
-use crate::util::Id;
 use glam::Vec2;
 use log::error;
 use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::sync::LazyLock;
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, KeyEvent, MouseButton};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 
 /// The actions of the game, in the order of their ids.
-pub static INPUT_MAP: LazyLock<Registry<Input>> = LazyLock::new(build_input_map);
+pub(crate) static INPUT_MAP: LazyLock<Registry<Input>> = LazyLock::new(build_input_map);
 /// Rotation per pixel of mouse motion, in radians.
-pub static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 256.0);
+pub(crate) static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 256.0);
 
 /// Builds the input map; the id an action is registered under is the action id
 /// the systems use.
@@ -60,7 +59,7 @@ fn build_input_map() -> Registry<Input> {
         input_type: InputType::JustPressed,
     };
 
-    input_map.register(0, "escape", escape);
+    input_map.register(0, "return", escape);
     input_map.register(1, "forward", forward);
     input_map.register(2, "left", left);
     input_map.register(3, "backward", backward);
@@ -104,6 +103,7 @@ pub struct InputState {
     pub cursor_grabbed: bool,
     pub cursor_pos: Vec2,
     pub mouse_motion: Vec2,
+    pub mouse_scroll: Vec2,
     pressed_buttons: HashSet<MouseButton>,
     just_pressed_buttons: HashSet<MouseButton>,
     just_released_buttons: HashSet<MouseButton>,
@@ -144,6 +144,20 @@ impl InputState {
         self.mouse_motion[0] += delta.0 as f32;
         self.mouse_motion[1] -= delta.1 as f32;
     }
+    
+    pub fn push_mouse_scroll(&mut self, delta: MouseScrollDelta) {
+        match delta {
+            MouseScrollDelta::LineDelta(dx, dy) => {
+                self.mouse_scroll.x += dx;
+                self.mouse_scroll.y += dy;
+            }
+            
+            MouseScrollDelta::PixelDelta(delta) => {
+                self.mouse_scroll.x += delta.x as f32;
+                self.mouse_scroll.y += delta.y as f32;
+            },
+        }
+    }
 
     /// Records a mouse button going down or coming up.
     pub fn push_button_event(&mut self, button: MouseButton, state: ElementState) {
@@ -167,13 +181,6 @@ impl InputState {
         self.just_released_keys.clear();
         self.just_pressed_buttons.clear();
         self.just_released_buttons.clear();
-    }
-
-    /// Returns whether the action with `action_id` is currently present.
-    #[inline]
-    pub fn is_action_present(&self, action_id: Id) -> bool {
-        let input = INPUT_MAP.get(action_id);
-        self.is_input_present(input)
     }
 
     /// Returns whether `input` is currently present.
@@ -228,7 +235,7 @@ impl InputState {
 /// Grabs the cursor while the game is playing and releases it while a menu is
 /// open.
 #[derive(Default)]
-pub struct CursorApplier {
+pub(super) struct CursorApplier {
     /// The grab state that was last applied to the window.
     grabbed: bool,
 }

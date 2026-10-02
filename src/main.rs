@@ -5,8 +5,7 @@ use std::panic;
 use winit::error::EventLoopError;
 
 fn main() -> Result<(), EventLoopError> {
-    // Panics are reported through the logging framework, so the logger has to
-    // exist before the hook is installed.
+    // Panics are reported through the logging framework.
     env_logger::init();
     panic::set_hook(Box::new(|info| {
         Game::crash(info);

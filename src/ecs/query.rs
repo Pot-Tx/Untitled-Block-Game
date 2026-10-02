@@ -4,8 +4,8 @@
 //! [`OptionalWrite`], and a [`CompQuery`] is a tuple of fetches; resources work
 //! the same way through [`ResFetch`] and [`ResQuery`]. Every fetch reports the
 //! types it touches through [`Access`], which the scheduler uses to tell
-//! whether two systems may run in parallel, and validation checks that the
-//! storage a fetch needs has been registered.
+//! whether two systems may run in parallel, and every lookup fails with a
+//! [`QueryError`] when the storage a fetch needs has not been registered.
 //!
 //! The fetches hold raw pointers to the storage instead of references, because
 //! a system hands out one mutable borrow per entity while the other fetches of
@@ -13,32 +13,22 @@
 
 use crate::ecs::component::ComponentManager;
 use crate::ecs::resource::ResourceManager;
-use crate::ecs::{Component, ErasedComponent, Resource};
+use crate::ecs::{Component, ErasedComponent, ErasedResource, Resource};
 use crate::util::Id;
-use std::any::{type_name, TypeId};
+use std::any::TypeId;
 use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
 use std::iter;
 use std::marker::PhantomData;
 
-/// The error of validating a query, naming the type that is not registered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum QueryError {
     MissingComponent(&'static str),
     MissingComponentId(TypeId),
+    MissingComponentName(String),
     MissingResource(&'static str),
-}
-
-impl QueryError {
-    /// The error for a component type that is not registered.
-    pub fn component<C: 'static>() -> Self {
-        Self::MissingComponent(type_name::<C>())
-    }
-
-    /// The error for a resource type that is not registered.
-    pub fn resource<R: 'static>() -> Self {
-        Self::MissingResource(type_name::<R>())
-    }
+    MissingResourceId(TypeId),
+    MissingResourceName(String),
 }
 
 impl Display for QueryError {
@@ -47,68 +37,73 @@ impl Display for QueryError {
             Self::MissingComponent(name) => write!(f, "component {} is not registered", name),
 
             Self::MissingComponentId(id) => write!(f, "component {:?} is not registered", id),
+            
+            Self::MissingComponentName(name) => write!(f, "component name \"{}\" is not registered", name),
 
             Self::MissingResource(name) => write!(f, "resource {} is not registered", name),
+            
+            Self::MissingResourceId(id) => write!(f, "resource {:?} is not registered", id),
+            
+            Self::MissingResourceName(name) => write!(f, "resource name \"{}\" is not registered", name),
         }
     }
 }
 
 impl std::error::Error for QueryError {}
 
-/// A query over the components of the entities a system runs on.
-///
 /// The first fetch of the query drives the iteration, so it has to be a fetch
 /// that iterates entities ([`CompRead`] or [`CompWrite`]); the fetches after it
 /// filter or widen the entity that is currently being visited.
 pub trait CompQuery {
-    type Item<'a>;
+    type Item<'a> where Self: 'a;
 
     fn access() -> Access;
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError>;
-
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, f: F);
+    
+    fn new(components: &ComponentManager) -> Result<Self, QueryError>
+    where
+        Self: Sized; 
+    
+    fn iter(&self) -> impl Iterator<Item = Self::Item<'_>>;
 }
 
-/// A query over the resources a system runs on.
 pub trait ResQuery {
-    type Item<'a>;
+    type Item<'a> where Self: 'a;
 
     fn access() -> Access;
-
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError>;
-
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F);
+    
+    fn new(resources: &ResourceManager) -> Result<Self, QueryError>
+    where
+        Self: Sized;
+    
+    fn get(&self) -> Self::Item<'_>;
 }
 
-/// One component access inside a [`CompQuery`].
 pub trait CompFetch {
-    type Item<'a>;
+    type Item<'a> where Self: 'a;
 
     fn add_to(access: &mut Access);
 
-    fn validate(components: &ComponentManager) -> Result<(), QueryError>;
+    fn new(components: &ComponentManager) -> Result<Self, QueryError>
+    where
+        Self: Sized;
 
-    fn new(components: &ComponentManager) -> Self;
+    fn get(&self, entity: Id) -> Option<Self::Item<'_>>;
 
-    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>>;
-
-    fn iter(components: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)>;
+    fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)>;
 }
 
-/// One resource access inside a [`ResQuery`].
 pub trait ResFetch {
-    type Item<'a>;
+    type Item<'a> where Self: 'a;
 
     fn add_to(access: &mut Access);
+    
+    fn new(resources: &ResourceManager) -> Result<Self, QueryError>
+    where
+        Self: Sized;
 
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError>;
-
-    fn get(resources: &ResourceManager) -> Self::Item<'_>;
+    fn get(&self) -> Self::Item<'_>;
 }
 
-/// The component and resource types a fetch reads and writes.
-///
 /// The scheduler adds the accesses of the systems of a stage together, and
 /// starts a new sub-stage whenever they overlap.
 #[derive(Default)]
@@ -137,119 +132,106 @@ impl Access {
     }
 }
 
-/// Reads one component of the visited entity.
 pub struct CompRead<C: Component> {
     comp: *const ErasedComponent,
-    marker: PhantomData<C>,
+    _marker: PhantomData<C>,
 }
 
-/// Reads and writes one component of the visited entity.
 pub struct CompWrite<C: Component> {
     comp: *const ErasedComponent,
-    marker: PhantomData<C>,
+    _marker: PhantomData<C>,
 }
 
-/// Reads a component that the visited entity may not have.
 pub struct OptionalRead<C: Component> {
     comp: *const ErasedComponent,
-    marker: PhantomData<C>,
+    _marker: PhantomData<C>,
 }
 
-/// Reads and writes a component that the visited entity may not have.
 pub struct OptionalWrite<C: Component> {
     comp: *const ErasedComponent,
-    marker: PhantomData<C>,
+    _marker: PhantomData<C>,
 }
 
-/// Restricts the query to the entities that do not have this component.
 pub struct Without<C: Component> {
     comp: *const ErasedComponent,
-    marker: PhantomData<C>,
+    _marker: PhantomData<C>,
 }
 
-/// Reads one resource.
-pub struct ResRead<R: Resource>(PhantomData<R>);
+pub struct ResRead<R: Resource> {
+    res: *const ErasedResource,
+    _marker: PhantomData<R>,
+}
 
-/// Reads and writes one resource.
-pub struct ResWrite<R: Resource>(PhantomData<R>);
+pub struct ResWrite<R: Resource> {
+    res: *const ErasedResource,
+    _marker: PhantomData<R>,
+}
 
 impl<C: Component> CompFetch for CompRead<C> {
     type Item<'a> = &'a C;
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        components.try_get::<C>().map(|_| ())
-    }
 
     fn add_to(access: &mut Access) {
         access.read.insert(TypeId::of::<C>());
     }
 
-    fn new(components: &ComponentManager) -> Self {
-        Self {
-            comp: components.get::<C>(),
-            marker: PhantomData,
-        }
+    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            comp: components.get::<C>()?,
+            _marker: PhantomData,
+        })
     }
 
-    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+    fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { (&*self.comp).get::<C>(entity) }
     }
 
-    fn iter(components: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
-        components.get::<C>().iter()
+    fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+        unsafe { (&*self.comp).iter() }
     }
 }
 
 impl<C: Component> CompFetch for CompWrite<C> {
     type Item<'a> = &'a mut C;
 
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        components.try_get::<C>().map(|_| ())
-    }
-
     fn add_to(access: &mut Access) {
         access.write.insert(TypeId::of::<C>());
     }
 
-    fn new(components: &ComponentManager) -> Self {
-        Self {
-            comp: components.get::<C>(),
-            marker: PhantomData,
-        }
+    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            comp: components.get::<C>()?,
+            _marker: PhantomData,
+        })
     }
 
-    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+    fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { (&*self.comp).get_mut::<C>(entity) }
     }
-
-    fn iter(components: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
-        components.get::<C>().iter_mut()
+    
+    fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+        unsafe { (&*self.comp).iter_mut() }
     }
 }
 
 impl<C: Component> CompFetch for OptionalRead<C> {
     type Item<'a> = Option<&'a C>;
 
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        components.try_get::<C>().map(|_| ())
-    }
-
     fn add_to(access: &mut Access) {
         access.read.insert(TypeId::of::<C>());
     }
 
-    fn new(components: &ComponentManager) -> Self {
-        Self {
-            comp: components.get::<C>(),
-            marker: PhantomData,
-        }
+    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            comp: components.get::<C>()?,
+            _marker: PhantomData,
+        })
     }
 
-    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+    fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { Some((&*self.comp).get::<C>(entity)) }
     }
-
-    fn iter(_: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+    
+    fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         iter::empty()
     }
 }
@@ -257,26 +239,22 @@ impl<C: Component> CompFetch for OptionalRead<C> {
 impl<C: Component> CompFetch for OptionalWrite<C> {
     type Item<'a> = Option<&'a mut C>;
 
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        components.try_get::<C>().map(|_| ())
-    }
-
     fn add_to(access: &mut Access) {
         access.write.insert(TypeId::of::<C>());
     }
 
-    fn new(components: &ComponentManager) -> Self {
-        Self {
-            comp: components.get::<C>(),
-            marker: PhantomData,
-        }
+    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            comp: components.get::<C>()?,
+            _marker: PhantomData,
+        })
     }
 
-    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+    fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { Some((&*self.comp).get_mut::<C>(entity)) }
     }
-
-    fn iter(_: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+    
+    fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         iter::empty()
     }
 }
@@ -284,20 +262,16 @@ impl<C: Component> CompFetch for OptionalWrite<C> {
 impl<C: Component> CompFetch for Without<C> {
     type Item<'a> = ();
 
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        components.try_get::<C>().map(|_| ())
-    }
-
     fn add_to(_: &mut Access) {}
 
-    fn new(components: &ComponentManager) -> Self {
-        Self {
-            comp: components.get::<C>(),
-            marker: PhantomData,
-        }
+    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            comp: components.get::<C>()?,
+            _marker: PhantomData,
+        })
     }
 
-    fn get<'a>(&self, entity: Id) -> Option<Self::Item<'a>> {
+    fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe {
             if (&*self.comp).contains(entity) {
                 None
@@ -306,8 +280,8 @@ impl<C: Component> CompFetch for Without<C> {
             }
         }
     }
-
-    fn iter(_: &ComponentManager) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
+    
+    fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         iter::empty()
     }
 }
@@ -315,32 +289,38 @@ impl<C: Component> CompFetch for Without<C> {
 impl<R: Resource> ResFetch for ResRead<R> {
     type Item<'a> = &'a R;
 
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        resources.try_get::<R>().map(|_| ())
-    }
-
     fn add_to(access: &mut Access) {
         access.read.insert(TypeId::of::<R>());
     }
+    
+    fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            res: resources.get::<R>()?,
+            _marker: PhantomData,
+        })
+    }
 
-    fn get(resources: &ResourceManager) -> Self::Item<'_> {
-        resources.get::<R>()
+    fn get(&self) -> Self::Item<'_> {
+        unsafe { (&*self.res).get() }
     }
 }
 
 impl<R: Resource> ResFetch for ResWrite<R> {
     type Item<'a> = &'a mut R;
 
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        resources.try_get::<R>().map(|_| ())
-    }
-
     fn add_to(access: &mut Access) {
         access.write.insert(TypeId::of::<R>());
     }
-
-    fn get(resources: &ResourceManager) -> Self::Item<'_> {
-        resources.get_mut::<R>()
+    
+    fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
+        Ok(Self {
+            res: resources.get::<R>()?,
+            _marker: PhantomData,
+        })
+    }
+    
+    fn get(&self) -> Self::Item<'_> {
+        unsafe { (&*self.res).get_mut() }
     }
 }
 
@@ -351,411 +331,139 @@ impl CompQuery for () {
     fn access() -> Access {
         Access::new()
     }
-
-    fn validate(_: &ComponentManager) -> Result<(), QueryError> {
+    
+    fn new(_: &ComponentManager) -> Result<Self, QueryError> {
         Ok(())
     }
-
-    fn for_each<F: FnMut(Self::Item<'_>)>(_: &ComponentManager, f: F) {
-        iter::once(()).for_each(f);
+    
+    fn iter(&self) -> impl Iterator<Item = Self::Item<'_>> {
+        iter::once(())
     }
 }
 
-/// A query without resources.
 impl ResQuery for () {
     type Item<'a> = ();
 
     fn access() -> Access {
         Access::new()
     }
-
-    fn validate(_: &ResourceManager) -> Result<(), QueryError> {
+    
+    fn new(_: &ResourceManager) -> Result<Self, QueryError> {
         Ok(())
     }
-
-    fn run<F: FnOnce(Self::Item<'_>)>(_: &ResourceManager, f: F) {
-        f(());
+    
+    fn get(&self) -> Self::Item<'_> {
+        ()
     }
 }
 
-/// The single fetch of a one element query.
 impl<C: CompFetch> CompQuery for C {
-    type Item<'a> = (Id, C::Item<'a>);
+    type Item<'a> = (Id, C::Item<'a>) where C: 'a;
 
     fn access() -> Access {
         let mut access = Access::new();
         C::add_to(&mut access);
         access
     }
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        C::validate(components)
+    
+    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+        C::new(components)
+    }
+    
+    fn iter(&self) -> impl Iterator<Item = Self::Item<'_>> {
+        self.iter()
     }
 
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, f: F) {
-        C::iter(components).for_each(f);
-    }
 }
 
-/// The single fetch of a one element resource query.
 impl<R: ResFetch> ResQuery for R {
-    type Item<'a> = R::Item<'a>;
+    type Item<'a> = R::Item<'a> where R: 'a;
 
     fn access() -> Access {
         let mut access = Access::new();
         R::add_to(&mut access);
         access
     }
-
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        R::validate(resources)
+    
+    fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
+        R::new(resources)
     }
-
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
-        f(R::get(resources));
+    
+    fn get(&self) -> Self::Item<'_> {
+        self.get()
     }
 }
 
-/// A query of two fetches: the first one drives the iteration and the second is
-/// looked up for every entity it yields.
-impl<C: CompFetch, D: CompFetch> CompQuery for (C, D) {
-    type Item<'a> = (Id, C::Item<'a>, D::Item<'a>);
+/// The component arm lets the first fetch drive the iteration and looks the
+/// later ones up for every entity it yields; the resource arm fetches every
+/// value before it hands them over.
+///
+/// Every fetch is written as the pair of its type and the names its fetch and
+/// its item are bound to, because a tuple element cannot be addressed by an
+/// index from within a `macro_rules!` body.
+macro_rules! impl_query {
+    (comp $head:ident($head_fetch:ident, $head_item:ident)
+        $(, $tail:ident($tail_fetch:ident, $tail_item:ident))*) => {
+        impl<$head: CompFetch, $($tail: CompFetch),*> CompQuery for ($head, $($tail,)*) {
+            type Item<'a> = (Id, $head::Item<'a>, $($tail::Item<'a>,)*) where Self: 'a;
 
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        C::validate(components)?;
-        D::validate(components)
-    }
+            fn access() -> Access {
+                let mut access = Access::new();
+                $head::add_to(&mut access);
+                $($tail::add_to(&mut access);)*
+                access
+            }
 
-    fn access() -> Access {
-        let mut access = Access::new();
-        C::add_to(&mut access);
-        D::add_to(&mut access);
-        access
-    }
+            fn new(components: &ComponentManager) -> Result<Self, QueryError> {
+                Ok(($head::new(components)?, $($tail::new(components)?,)*))
+            }
 
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
-        let d = D::new(components);
-        for (i, c) in C::iter(components) {
-            if let Some(d) = d.get(i) {
-                f((i, c, d));
+            fn iter(&self) -> impl Iterator<Item = Self::Item<'_>> {
+                let ($head_fetch, $($tail_fetch,)*) = self;
+
+                $head_fetch.iter().filter_map(move |(id, $head_item)| {
+                    $(let $tail_item = $tail_fetch.get(id)?;)*
+
+                    Some((id, $head_item, $($tail_item,)*))
+                })
             }
         }
-    }
-}
+    };
 
-/// A resource query of two fetches.
-impl<R: ResFetch, S: ResFetch> ResQuery for (R, S) {
-    type Item<'a> = (R::Item<'a>, S::Item<'a>);
+    (res $head:ident($head_fetch:ident) $(, $tail:ident($tail_fetch:ident))*) => {
+        impl<$head: ResFetch, $($tail: ResFetch),*> ResQuery for ($head, $($tail,)*) {
+            type Item<'a> = ($head::Item<'a>, $($tail::Item<'a>,)*) where Self: 'a;
 
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        R::validate(resources)?;
-        S::validate(resources)
-    }
+            fn access() -> Access {
+                let mut access = Access::new();
+                $head::add_to(&mut access);
+                $($tail::add_to(&mut access);)*
+                access
+            }
 
-    fn access() -> Access {
-        let mut access = Access::new();
-        R::add_to(&mut access);
-        S::add_to(&mut access);
-        access
-    }
+            fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
+                Ok(($head::new(resources)?, $($tail::new(resources)?,)*))
+            }
 
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
-        f((R::get(resources), S::get(resources)));
-    }
-}
+            fn get(&self) -> Self::Item<'_> {
+                let ($head_fetch, $($tail_fetch,)*) = self;
 
-impl<C: CompFetch, D: CompFetch, E: CompFetch> CompQuery for (C, D, E) {
-    type Item<'a> = (Id, C::Item<'a>, D::Item<'a>, E::Item<'a>);
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        C::validate(components)?;
-        D::validate(components)?;
-        E::validate(components)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        C::add_to(&mut access);
-        D::add_to(&mut access);
-        E::add_to(&mut access);
-        access
-    }
-
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
-        let d = D::new(components);
-        let e = E::new(components);
-        for (i, c) in C::iter(components) {
-            if let Some(d) = d.get(i)
-                && let Some(e) = e.get(i)
-            {
-                f((i, c, d, e));
+                ($head_fetch.get(), $($tail_fetch.get(),)*)
             }
         }
-    }
+    };
 }
 
-impl<R: ResFetch, S: ResFetch, T: ResFetch> ResQuery for (R, S, T) {
-    type Item<'a> = (R::Item<'a>, S::Item<'a>, T::Item<'a>);
+impl_query!(comp C(cf, cv));
+impl_query!(comp C(cf, cv), D(df, dv));
+impl_query!(comp C(cf, cv), D(df, dv), E(ef, ev));
+impl_query!(comp C(cf, cv), D(df, dv), E(ef, ev), G(gf, gv));
+impl_query!(comp C(cf, cv), D(df, dv), E(ef, ev), G(gf, gv), H(hf, hv));
+impl_query!(comp C(cf, cv), D(df, dv), E(ef, ev), G(gf, gv), H(hf, hv), J(jf, jv));
 
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        R::validate(resources)?;
-        S::validate(resources)?;
-        T::validate(resources)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        R::add_to(&mut access);
-        S::add_to(&mut access);
-        T::add_to(&mut access);
-        access
-    }
-
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
-        f((R::get(resources), S::get(resources), T::get(resources)));
-    }
-}
-
-impl<C: CompFetch, D: CompFetch, E: CompFetch, G: CompFetch> CompQuery for (C, D, E, G) {
-    type Item<'a> = (Id, C::Item<'a>, D::Item<'a>, E::Item<'a>, G::Item<'a>);
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        C::validate(components)?;
-        D::validate(components)?;
-        E::validate(components)?;
-        G::validate(components)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        C::add_to(&mut access);
-        D::add_to(&mut access);
-        E::add_to(&mut access);
-        G::add_to(&mut access);
-        access
-    }
-
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
-        let d = D::new(components);
-        let e = E::new(components);
-        let g = G::new(components);
-        for (i, c) in C::iter(components) {
-            if let Some(d) = d.get(i)
-                && let Some(e) = e.get(i)
-                && let Some(g) = g.get(i)
-            {
-                f((i, c, d, e, g));
-            }
-        }
-    }
-}
-
-impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch> ResQuery for (R, S, T, U) {
-    type Item<'a> = (R::Item<'a>, S::Item<'a>, T::Item<'a>, U::Item<'a>);
-
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        R::validate(resources)?;
-        S::validate(resources)?;
-        T::validate(resources)?;
-        U::validate(resources)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        R::add_to(&mut access);
-        S::add_to(&mut access);
-        T::add_to(&mut access);
-        U::add_to(&mut access);
-        access
-    }
-
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
-        f((
-            R::get(resources),
-            S::get(resources),
-            T::get(resources),
-            U::get(resources),
-        ));
-    }
-}
-
-impl<C: CompFetch, D: CompFetch, E: CompFetch, G: CompFetch, H: CompFetch> CompQuery
-    for (C, D, E, G, H)
-{
-    type Item<'a> = (
-        Id,
-        C::Item<'a>,
-        D::Item<'a>,
-        E::Item<'a>,
-        G::Item<'a>,
-        H::Item<'a>,
-    );
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        C::validate(components)?;
-        D::validate(components)?;
-        E::validate(components)?;
-        G::validate(components)?;
-        H::validate(components)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        C::add_to(&mut access);
-        D::add_to(&mut access);
-        E::add_to(&mut access);
-        G::add_to(&mut access);
-        H::add_to(&mut access);
-        access
-    }
-
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
-        let d = D::new(components);
-        let e = E::new(components);
-        let g = G::new(components);
-        let h = H::new(components);
-        for (i, c) in C::iter(components) {
-            if let Some(d) = d.get(i)
-                && let Some(e) = e.get(i)
-                && let Some(g) = g.get(i)
-                && let Some(h) = h.get(i)
-            {
-                f((i, c, d, e, g, h));
-            }
-        }
-    }
-}
-
-impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch, V: ResFetch> ResQuery for (R, S, T, U, V) {
-    type Item<'a> = (
-        R::Item<'a>,
-        S::Item<'a>,
-        T::Item<'a>,
-        U::Item<'a>,
-        V::Item<'a>,
-    );
-
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        R::validate(resources)?;
-        S::validate(resources)?;
-        T::validate(resources)?;
-        U::validate(resources)?;
-        V::validate(resources)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        R::add_to(&mut access);
-        S::add_to(&mut access);
-        T::add_to(&mut access);
-        U::add_to(&mut access);
-        V::add_to(&mut access);
-        access
-    }
-
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
-        f((
-            R::get(resources),
-            S::get(resources),
-            T::get(resources),
-            U::get(resources),
-            V::get(resources),
-        ));
-    }
-}
-
-impl<C: CompFetch, D: CompFetch, E: CompFetch, G: CompFetch, H: CompFetch, J: CompFetch> CompQuery
-    for (C, D, E, G, H, J)
-{
-    type Item<'a> = (
-        Id,
-        C::Item<'a>,
-        D::Item<'a>,
-        E::Item<'a>,
-        G::Item<'a>,
-        H::Item<'a>,
-        J::Item<'a>,
-    );
-
-    fn validate(components: &ComponentManager) -> Result<(), QueryError> {
-        C::validate(components)?;
-        D::validate(components)?;
-        E::validate(components)?;
-        G::validate(components)?;
-        H::validate(components)?;
-        J::validate(components)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        C::add_to(&mut access);
-        D::add_to(&mut access);
-        E::add_to(&mut access);
-        G::add_to(&mut access);
-        H::add_to(&mut access);
-        J::add_to(&mut access);
-        access
-    }
-
-    fn for_each<F: FnMut(Self::Item<'_>)>(components: &ComponentManager, mut f: F) {
-        let d = D::new(components);
-        let e = E::new(components);
-        let g = G::new(components);
-        let h = H::new(components);
-        let j = J::new(components);
-        for (i, c) in C::iter(components) {
-            if let Some(d) = d.get(i)
-                && let Some(e) = e.get(i)
-                && let Some(g) = g.get(i)
-                && let Some(h) = h.get(i)
-                && let Some(j) = j.get(i)
-            {
-                f((i, c, d, e, g, h, j));
-            }
-        }
-    }
-}
-
-impl<R: ResFetch, S: ResFetch, T: ResFetch, U: ResFetch, V: ResFetch, W: ResFetch> ResQuery
-    for (R, S, T, U, V, W)
-{
-    type Item<'a> = (
-        R::Item<'a>,
-        S::Item<'a>,
-        T::Item<'a>,
-        U::Item<'a>,
-        V::Item<'a>,
-        W::Item<'a>,
-    );
-
-    fn validate(resources: &ResourceManager) -> Result<(), QueryError> {
-        R::validate(resources)?;
-        S::validate(resources)?;
-        T::validate(resources)?;
-        U::validate(resources)?;
-        V::validate(resources)?;
-        W::validate(resources)
-    }
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        R::add_to(&mut access);
-        S::add_to(&mut access);
-        T::add_to(&mut access);
-        U::add_to(&mut access);
-        V::add_to(&mut access);
-        W::add_to(&mut access);
-        access
-    }
-
-    fn run<F: FnOnce(Self::Item<'_>)>(resources: &ResourceManager, f: F) {
-        f((
-            R::get(resources),
-            S::get(resources),
-            T::get(resources),
-            U::get(resources),
-            V::get(resources),
-            W::get(resources),
-        ));
-    }
-}
+impl_query!(res R(rf));
+impl_query!(res R(rf), S(sf));
+impl_query!(res R(rf), S(sf), T(tf));
+impl_query!(res R(rf), S(sf), T(tf), U(uf));
+impl_query!(res R(rf), S(sf), T(tf), U(uf), V(vf));
+impl_query!(res R(rf), S(sf), T(tf), U(uf), V(vf), W(wf));

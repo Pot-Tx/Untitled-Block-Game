@@ -4,8 +4,8 @@ use crate::util::collection::Volume;
 use crate::util::coord::{Axis, Coord3, ICoord3};
 use crate::world::block::Meta;
 use crate::world::region::*;
-use crate::world::{BlockPos, Chunk, RegionPos, WorldThreads, LOD_COUNT};
-use anyhow::{anyhow, Result};
+use crate::world::*;
+use anyhow::anyhow;
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{IVec3, U8Vec3, Vec3};
@@ -112,8 +112,7 @@ impl<T> ArcRingVolume<T> {
         pos.rem_euclid(self.volume.size.as_ivec3()).as_u8vec3()
     }
 
-    /// The grid of the region at `pos`, which has to lie inside the volume.
-    pub fn get(&self, pos: IVec3) -> Result<Option<Arc<T>>> {
+    pub fn get(&self, pos: IVec3) -> anyhow::Result<Option<Arc<T>>> {
         if self.bound.load().is_point_inside(pos) {
             Ok(self.volume.get(self.cast_pos(pos)).load_full())
         } else {
@@ -121,8 +120,7 @@ impl<T> ArcRingVolume<T> {
         }
     }
 
-    /// Stores the grid of the region at `pos`.
-    pub fn set(&self, pos: IVec3, value: T) -> Result<Option<Arc<T>>> {
+    pub fn set(&self, pos: IVec3, value: T) -> anyhow::Result<Option<Arc<T>>> {
         if self.bound.load().is_point_inside(pos) {
             Ok(self
                 .volume
@@ -133,7 +131,6 @@ impl<T> ArcRingVolume<T> {
         }
     }
 
-    /// Moves the volume by `dpos`, clearing the entries that fall outside it.
     pub fn translate(&self, dpos: IVec3) {
         let bound = self.bound.load();
         let new_bound = bound.translate(dpos);
@@ -178,7 +175,6 @@ impl<T> ArcRingVolume<T> {
     }
 }
 
-/// The noise functions the terrain is built from, sampled at a block position.
 pub struct Field {
     /// Climate of a position, currently unused by the terrain function.
     pub climate: fn(BlockPos) -> Vec3,
@@ -188,8 +184,6 @@ pub struct Field {
     pub erosion: fn(BlockPos) -> f32,
 }
 
-/// The field values at one position, which is what the terrain function turns
-/// into a block.
 #[derive(Clone, Copy, Default)]
 pub struct Sample {
     pub climate: Vec3,
@@ -254,7 +248,6 @@ pub struct Structure {
 }
 
 impl Structure {
-    /// The oak tree: a canopy, a two block wide trunk and a single block top.
     pub fn tree() -> Self {
         let mut blocks0 = Volume::new(U8Vec3::new(5, 8, 5));
         blocks0.fill(U8Vec3::new(0, 4, 1), U8Vec3::new(5, 7, 4), Some(5));
@@ -292,7 +285,6 @@ impl Structure {
     }
 }
 
-/// The world generator: turns regions of samples into chunks of blocks.
 pub struct Generator {
     context: Arc<GenContext>,
     task_rx: Receiver<GenTask>,
@@ -310,7 +302,6 @@ pub struct GenContext {
 }
 
 impl Generator {
-    /// Creates the generator and the ring of grids it fills in.
     pub fn new(
         center: RegionPos,
         radius: u8,
@@ -334,9 +325,6 @@ impl Generator {
         }
     }
 
-    /// Dispatches the queued generation tasks onto the thread pool of the level
-    /// of detail they belong to.
-    ///
     /// The near and far tasks are kept apart so that a slow coarse region cannot
     /// hold up the regions around the player.
     pub fn update(&mut self, translation: IVec3, threads: &WorldThreads) {
@@ -456,7 +444,7 @@ impl GenContext {
 
     /// The sample grids of the `side ^ 3` regions starting at `pos`, generating
     /// the grids that are missing.
-    fn samples_in_range(&self, pos: RegionPos, side: u8) -> Result<SampleGridView> {
+    fn samples_in_range(&self, pos: RegionPos, side: u8) -> anyhow::Result<SampleGridView> {
         let mut vec = Vec::with_capacity((side as usize).pow(3));
 
         for dx in 0..side {
@@ -525,7 +513,7 @@ impl GenContext {
 
     /// The sites of every structure in the `side ^ 3` regions starting at `pos`,
     /// as offsets from the block position of the first region.
-    fn sites_in_range(&self, pos: RegionPos, side: u8) -> Result<Vec<Vec<LocalPos>>> {
+    fn sites_in_range(&self, pos: RegionPos, side: u8) -> anyhow::Result<Vec<Vec<LocalPos>>> {
         let mut sites = vec![Vec::new(); self.structures.len()];
 
         for dx in 0..side {
@@ -581,18 +569,15 @@ impl GenContext {
     }
 }
 
-/// A request to generate the chunk of one region.
 pub struct GenTask {
     pub pos: RegionPos,
     pub lod: u8,
     pub tx: Sender<GenResult>,
 }
 
-/// The chunk of a generated region.
 pub struct GenResult {
     pub lod: u8,
     pub chunk: Chunk,
 }
 
-/// The resource that owns the generator, so that a system can drive it.
 impl Resource for Generator {}

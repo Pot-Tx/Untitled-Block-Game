@@ -1,15 +1,16 @@
 use crate::actor::SelectedItem;
-use crate::util::coord::{Axis, Coord, Coord3, FCoord, FCoord3};
+use crate::util::coord::*;
 use crate::world::World;
 use glam::{IVec3, Vec3};
 use num_traits::{FromPrimitive, Signed, Zero};
+use serde::{Deserialize, Serialize};
 use std::ops::Neg;
 
 /// An axis aligned box, stored as its minimum and maximum corner.
 ///
 /// All containment tests treat `min` as inclusive and `max` as exclusive, so
 /// adjacent boxes never overlap.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct AABB<C: Coord> {
     pub min: C,
     pub max: C,

@@ -234,77 +234,41 @@ impl<S: BindSignature> BatchParam for &BindSet<S> {
     }
 }
 
-/// Tuples of bind sets are pushed in the order they are written, so that the
-/// group indices match the binding order of the signature.
-impl<S: BindSignature, T: BindSignature> BatchParam for (&BindSet<S>, &BindSet<T>) {
-    fn bind_groups(&self) -> Vec<&BindGroup> {
-        vec![&self.0.bind_group, &self.1.bind_group]
-    }
-}
-
-impl<S: BindSignature, T: BindSignature, U: BindSignature> BatchParam
-    for (&BindSet<S>, &BindSet<T>, &BindSet<U>)
-{
-    fn bind_groups(&self) -> Vec<&BindGroup> {
-        vec![&self.0.bind_group, &self.1.bind_group, &self.2.bind_group]
-    }
-}
-
-impl<S: BindSignature, T: BindSignature, U: BindSignature, V: BindSignature> BatchParam
-    for (&BindSet<S>, &BindSet<T>, &BindSet<U>, &BindSet<V>)
-{
-    fn bind_groups(&self) -> Vec<&BindGroup> {
-        vec![
-            &self.0.bind_group,
-            &self.1.bind_group,
-            &self.2.bind_group,
-            &self.3.bind_group,
-        ]
-    }
-}
-
 /// A batch whose signature declares a single bind group layout.
 impl<S: BindSignature> BatchSignature for S {
     type Param<'a> = &'a BindSet<S>;
-
+    
     fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout> {
         vec![S::layout(canvas)]
     }
 }
 
-/// A batch that takes one bind group layout per element of the tuple.
-impl<S: BindSignature, T: BindSignature> BatchSignature for (S, T) {
-    type Param<'a> = (&'a BindSet<S>, &'a BindSet<T>);
+/// Implements [`BatchSignature`] for a tuple of signatures, together with the
+/// [`BatchParam`] the matching tuple of bind sets is pushed as.
+///
+/// Tuples of bind sets are pushed in the order they are written, so that the
+/// group indices match the binding order of the signature; every signature is
+/// written as the pair of its type and the name its bind set is bound to.
+macro_rules! impl_batch_signature {
+    ($($sig:ident($var:ident)),+ $(,)?) => {
+        impl<$($sig: BindSignature),+> BatchParam for ($(&BindSet<$sig>,)+) {
+            fn bind_groups(&self) -> Vec<&BindGroup> {
+                let ($($var,)+) = *self;
 
-    fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout> {
-        vec![S::layout(canvas), T::layout(canvas)]
-    }
+                vec![$(&$var.bind_group,)+]
+            }
+        }
+
+        impl<$($sig: BindSignature),+> BatchSignature for ($($sig,)+) {
+            type Param<'a> = ($(&'a BindSet<$sig>,)+);
+
+            fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout> {
+                vec![$($sig::layout(canvas),)+]
+            }
+        }
+    };
 }
 
-impl<S: BindSignature, T: BindSignature, U: BindSignature> BatchSignature for (S, T, U) {
-    type Param<'a> = (&'a BindSet<S>, &'a BindSet<T>, &'a BindSet<U>);
-
-    fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout> {
-        vec![S::layout(canvas), T::layout(canvas), U::layout(canvas)]
-    }
-}
-
-impl<S: BindSignature, T: BindSignature, U: BindSignature, V: BindSignature> BatchSignature
-    for (S, T, U, V)
-{
-    type Param<'a> = (
-        &'a BindSet<S>,
-        &'a BindSet<T>,
-        &'a BindSet<U>,
-        &'a BindSet<V>,
-    );
-
-    fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout> {
-        vec![
-            S::layout(canvas),
-            T::layout(canvas),
-            U::layout(canvas),
-            V::layout(canvas),
-        ]
-    }
-}
+impl_batch_signature!(S(s), T(t));
+impl_batch_signature!(S(s), T(t), U(u));
+impl_batch_signature!(S(s), T(t), U(u), V(v));

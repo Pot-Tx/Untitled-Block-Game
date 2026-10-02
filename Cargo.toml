@@ -14,6 +14,7 @@ bytemuck = "1.24.0"
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 glyph_brush = "0.7.12"
 rayon = "1.11.0"
+tokio = "1.53.1"
 pollster = "1.0.1"
 glam = { version = "0.33.6", features = ["bytemuck", "rand", "serde"] }
 num-traits = "0.2.19"

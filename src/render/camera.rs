@@ -1,10 +1,11 @@
-use crate::actor::{PlayerControlled, Position, PrevPos, Rotation};
+use crate::actor::{PlayerControlled, Position, Rotation};
 use crate::ecs::*;
 use crate::render::*;
 use crate::util::bounding::Plane;
 use crate::util::transform::Trans4;
-use glam::{f32, Mat3, Mat4, Vec2, Vec3};
+use glam::*;
 use std::f32::consts::FRAC_PI_2;
+use serde::{Deserialize, Serialize};
 use wgpu::*;
 
 /// The camera of the world pass, with the buffer its transform is uploaded to.
@@ -65,10 +66,9 @@ impl Camera {
         canvas: &Canvas,
         pos: &Position,
         rot: &Rotation,
-        prev_pos: &PrevPos,
         partial_tick: &PartialTick,
     ) {
-        let pos = prev_pos.0 + (pos.0 - prev_pos.0) * partial_tick.0;
+        let pos = pos.prev + (pos.cur - pos.prev) * partial_tick.0;
         let rot = rot.0;
         let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
 
@@ -117,7 +117,7 @@ pub struct ViewPort {
 }
 
 /// The edge of the window that a viewport is anchored to.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum ViewPortAlignment {
     Middle,
     Left,
@@ -266,14 +266,13 @@ impl BindSignature for Transformation {
 }
 
 /// Uploads the transform of the player camera every frame.
-pub struct CameraTransformer;
+pub(super) struct CameraTransformer;
 
 impl System for CameraTransformer {
     type CompQuery = (
         CompRead<PlayerControlled>,
         CompRead<Position>,
         CompRead<Rotation>,
-        CompRead<PrevPos>,
     );
     type ResQuery = (ResRead<Canvas>, ResWrite<Camera>, ResRead<PartialTick>);
 
@@ -282,7 +281,7 @@ impl System for CameraTransformer {
         entry: <Self::CompQuery as CompQuery>::Item<'_>,
         res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
     ) -> Option<Vec<Command>> {
-        res.1.transform(res.0, entry.2, entry.3, entry.4, res.2);
+        res.1.transform(res.0, entry.2, entry.3, res.2);
 
         None
     }

@@ -1,8 +1,6 @@
-use crate::actor::*;
 use crate::ecs::*;
 use crate::game::*;
 use crate::render::*;
-use crate::ui::*;
 use crate::util::coord::{Direction, ICoord3};
 use crate::util::OnceInit;
 use crate::world::*;
@@ -12,7 +10,6 @@ use log::error;
 use noise_functions::{CellDistanceSq, Noise, Perlin};
 use rayon::ThreadPoolBuilder;
 use smallvec::smallvec;
-use std::collections::HashMap;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -20,11 +17,11 @@ use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 
 /// The window of the game, which only exists once the event loop has resumed.
-pub static WINDOW: OnceInit<Window> = OnceInit::new();
+pub(crate) static WINDOW: OnceInit<Window> = OnceInit::new();
 
 /// The game client: it reacts to the window events and updates the worlds of the
 /// game and of the user interface.
-pub struct GameClient {
+pub(crate) struct GameClient {
     frame_timer: Instant,
     tick_timer: Instant,
 
@@ -59,10 +56,16 @@ impl ApplicationHandler for GameClient {
             }
 
             WindowEvent::Resized(size) => {
-                self.resources.get_mut::<Canvas>().resize(size);
                 self.resources
+                    .get::<Canvas>()
+                    .unwrap()
+                    .get_mut::<Canvas>()
+                    .resize(size);
+                self.resources
+                    .get::<Viewports>()
+                    .unwrap()
                     .get_mut::<Viewports>()
-                    .transform(self.resources.get::<Canvas>());
+                    .transform(self.resources.get::<Canvas>().unwrap().get::<Canvas>());
             }
 
             WindowEvent::RedrawRequested => {
@@ -70,19 +73,35 @@ impl ApplicationHandler for GameClient {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
-                self.resources.get_mut::<InputState>().push_key_event(event);
+                self.resources
+                    .get::<InputState>()
+                    .unwrap()
+                    .get_mut::<InputState>()
+                    .push_key_event(event);
             }
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.resources
+                    .get::<InputState>()
+                    .unwrap()
                     .get_mut::<InputState>()
                     .push_cursor_pos(position);
             }
 
             WindowEvent::MouseInput { button, state, .. } => {
                 self.resources
+                    .get::<InputState>()
+                    .unwrap()
                     .get_mut::<InputState>()
                     .push_button_event(button, state);
+            }
+            
+            WindowEvent::MouseWheel { delta, .. } => {
+                self.resources
+                    .get::<InputState>()
+                    .unwrap()
+                    .get_mut::<InputState>()
+                    .push_mouse_scroll(delta);
             }
 
             _ => (),
@@ -93,6 +112,8 @@ impl ApplicationHandler for GameClient {
         match event {
             DeviceEvent::MouseMotion { delta } => {
                 self.resources
+                    .get::<InputState>()
+                    .unwrap()
                     .get_mut::<InputState>()
                     .push_mouse_motion(delta);
             }
@@ -115,7 +136,11 @@ impl ApplicationHandler for GameClient {
             if !self.paused() {
                 let partial_tick =
                     self.tick_timer.elapsed().as_secs_f32() / TICK_DURATION.as_secs_f32();
-                self.resources.get_mut::<PartialTick>().0 = partial_tick;
+                self.resources
+                    .get::<PartialTick>()
+                    .unwrap()
+                    .get_mut::<PartialTick>()
+                    .0 = partial_tick;
             }
 
             WINDOW.request_redraw();
@@ -124,7 +149,11 @@ impl ApplicationHandler for GameClient {
 
     /// Saves the world before the window closes.
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        self.resources.get_mut::<World>().save();
+        self.resources
+            .get::<World>()
+            .unwrap()
+            .get_mut::<World>()
+            .save();
     }
 }
 
@@ -135,57 +164,53 @@ impl Default for GameClient {
 }
 
 impl GameClient {
-    /// Registers the components, the systems and the resources of the game.
+    /// Creates the client; everything it needs is registered by [`Self::setup`].
+    pub(crate) fn new() -> Self {
+        Self {
+            frame_timer: Instant::now(),
+            tick_timer: Instant::now(),
+
+            entities: EntityManager::new(),
+            resources: ResourceManager::new(),
+            tick_systems: SystemManager::new(),
+            frame_systems: SystemManager::new(),
+
+            ui_entities: EntityManager::new(),
+            ui_systems: SystemManager::new(),
+        }
+    }
+
+    /// Registers the components, the systems, the resources and the data of
+    /// the game, which the window is not needed for.
     ///
     /// The systems are registered by stage: systems of the same stage run in
-    /// parallel unless their accesses overlap, and a lower stage finishes before
-    /// the next one starts.
-    pub fn new() -> Self {
+    /// parallel unless their accesses overlap, and a lower stage finishes
+    /// before the next one starts.
+    pub(crate) fn setup(&mut self) {
+        crate::actor::register(
+            &mut self.entities,
+            &mut self.tick_systems,
+            &mut self.frame_systems,
+        );
+        crate::game::register(&mut self.frame_systems, &mut self.resources);
+        crate::render::register(&mut self.frame_systems, &mut self.resources);
+        crate::ui::register(
+            &mut self.ui_entities,
+            &mut self.ui_systems,
+            &mut self.resources,
+        );
+        crate::world::register(&mut self.tick_systems, &mut self.resources);
+
+        self.register_world();
+    }
+
+    /// Creates the channels, the threads and the resources of the voxel world.
+    ///
+    /// Temporary: the world and its generator are still described here, until
+    /// the mod scripts drive the world data.
+    fn register_world(&mut self) {
         let (gen_tx, gen_rx) = unbounded();
         let (meshing_tx, meshing_rx) = unbounded();
-
-        let mut entities = EntityManager::new();
-        let mut tick_systems = SystemManager::new();
-        let mut frame_systems = SystemManager::new();
-
-        let mut ui_entities = EntityManager::new();
-        let mut ui_systems = SystemManager::new();
-
-        let mut resources = ResourceManager::new();
-
-        entities.components.register::<Position>();
-        entities.components.register::<PrevPos>();
-        entities.components.register::<Rotation>();
-        entities.components.register::<Velocity>();
-        entities.components.register::<Speed>();
-        entities.components.register::<PlayerControlled>();
-        entities.components.register::<Bound>();
-        entities.components.register::<Contact>();
-        entities.components.register::<Flight>();
-        entities.components.register::<Selection>();
-        ui_entities.components.register::<UiRect>();
-        ui_entities.components.register::<UiSprite>();
-        ui_entities.components.register::<UiText>();
-        ui_entities.components.register::<ScreenTag>();
-        ui_entities.components.register::<OnClick>();
-
-        tick_systems.register(0, PlayerController);
-        tick_systems.register(1, Stalker);
-        tick_systems.register(1, Gravitator);
-        tick_systems.register(2, Translator);
-        tick_systems.register(3, Collider);
-        tick_systems.register(4, Friction);
-        tick_systems.register(5, Selector);
-        tick_systems.register(6, WorldUpdater);
-        tick_systems.register(7, ChunkMeshing);
-        frame_systems.register(0, CursorApplier::new());
-        frame_systems.register(1, PlayerRotator);
-        frame_systems.register(2, Interactor);
-        frame_systems.register(2, CameraTransformer);
-        ui_systems.register(0, CursorTracker);
-        ui_systems.register(1, ScreenController);
-        ui_systems.register(1, ScreenCollector);
-        ui_systems.register(2, UiPointer::new());
 
         let near_threads = ThreadPoolBuilder::new()
             .stack_size(4 * 1024 * 1024)
@@ -278,39 +303,19 @@ impl GameClient {
             gen_rx,
         );
 
-        resources.register(InputState::new());
-        resources.register(Paused(false));
-        resources.register(ActiveScreens {
-            screens: HashMap::new(),
-            order: Vec::new(),
-        });
-        resources.register(WorldThreads(near_threads, far_threads));
-        resources.register(world);
-        resources.register(generator);
-        resources.register(ChunkMesher::new(meshing_rx));
-        resources.register::<Option<Frame>>(None);
-        resources.register(PartialTick(0.0));
-        resources.register(Gravity(0.125));
-
-        Self {
-            frame_timer: Instant::now(),
-            tick_timer: Instant::now(),
-
-            entities,
-            resources,
-            tick_systems,
-            frame_systems,
-
-            ui_entities,
-            ui_systems,
-        }
+        self.resources
+            .register("world_threads", WorldThreads(near_threads, far_threads));
+        self.resources.register("world", world);
+        self.resources.register("generator", generator);
+        self.resources
+            .register("chunk_mesher", ChunkMesher::new(meshing_rx));
     }
 
     /// Returns whether an open screen pauses the game.
     fn paused(&self) -> bool {
         self.resources
-            .try_get::<Paused>()
-            .is_ok_and(|paused| paused.0)
+            .get::<Paused>()
+            .is_ok_and(|paused| paused.get::<Paused>().0)
     }
 
     /// Applies the queued commands and runs one step of the simulation.
@@ -333,8 +338,17 @@ impl GameClient {
             error!("failed to flush ui commands: {}", e);
         }
 
-        let frame = self.resources.get::<Canvas>().begin();
-        self.resources.get_mut::<Option<Frame>>().replace(frame);
+        let frame = self
+            .resources
+            .get::<Canvas>()
+            .unwrap()
+            .get::<Canvas>()
+            .begin();
+        self.resources
+            .get::<Option<Frame>>()
+            .unwrap()
+            .get_mut::<Option<Frame>>()
+            .replace(frame);
 
         match self.frame_systems.update(&self.entities, &self.resources) {
             Ok(commands) => self.entities.submit(commands),
@@ -348,48 +362,42 @@ impl GameClient {
             Err(e) => error!("failed to update ui: {}", e),
         }
 
-        self.resources.get_mut::<InputState>().clear();
+        self.resources
+            .get::<InputState>()
+            .unwrap()
+            .get_mut::<InputState>()
+            .clear();
 
-        if let Some(frame) = self.resources.get_mut::<Option<Frame>>().take() {
-            self.resources.get::<Canvas>().end(frame);
+        if let Some(frame) = self
+            .resources
+            .get::<Option<Frame>>()
+            .unwrap()
+            .get_mut::<Option<Frame>>()
+            .take()
+        {
+            self.resources
+                .get::<Canvas>()
+                .unwrap()
+                .get::<Canvas>()
+                .end(frame);
         } else {
             error!("failed to render frame");
         };
     }
 
-    /// Creates the resources that need a window, such as the canvas and the
-    /// textures, and spawns the player.
-    pub fn init(&mut self) {
+    /// Creates the resources that need a window, registers the renderers and
+    /// starts the first screens.
+    pub(crate) fn init(&mut self) {
         let canvas = pollster::block_on(Canvas::new(&WINDOW));
-        EMPTY_BUFFER_VEC.init(create_empty_buffer_vec(&canvas));
-        QUAD_INDEX_BUFFER_VEC.init(create_quad_index_buffer_vec(&canvas));
 
-        let block_textures =
-            BlockTextures(BLOCK_TEXTURES.create_texture_sampler(&canvas, "block", true));
-        let camera = Camera::new(&canvas);
-        let mut viewports = Viewports::new(&canvas, 256.0, 256.0);
-        viewports.transform(&canvas);
-        let player = ACTOR_TYPES.get(1).clone();
+        crate::render::init(&mut self.resources, &canvas);
+        crate::actor::register_canvas(&mut self.frame_systems, &canvas);
+        crate::world::register_canvas(&mut self.resources, &mut self.frame_systems, &canvas);
+        crate::ui::register_canvas(&mut self.ui_systems, &mut self.resources, &canvas);
 
-        self.frame_systems.register(3, WorldRenderer::new(&canvas));
-        self.frame_systems
-            .register(3, SelectionRenderer::new(&canvas));
-        self.ui_systems.register(3, UiRenderer::new(&canvas));
-        self.resources.register(canvas);
-        self.resources.register(block_textures);
-        self.resources.register(camera);
-        self.resources.register(viewports);
-        self.entities.spawn(player);
-
-        // The screens describe their elements as commands, which the UI entity
-        // manager applies on the next frame.
-        let mut commands = Vec::new();
-        {
-            let screens = self.resources.get_mut::<ActiveScreens>();
-            commands.extend(screens.open(HUD));
-            commands.extend(screens.open(HOTBAR));
-        }
-        self.ui_entities.submit(commands);
+        self.resources.register("canvas", canvas);
+        crate::actor::spawn_player(&mut self.entities);
+        crate::ui::open_initial(&mut self.ui_entities, &self.resources);
 
         self.tick_systems.init();
         self.ui_systems.init();

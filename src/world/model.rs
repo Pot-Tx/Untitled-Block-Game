@@ -6,7 +6,7 @@
 //! a chunk low.
 
 use crate::ecs::*;
-use crate::render::{AlphaVertex, BindSet, Mesh, MeshGroup, NormTexVertex, NormUvVertex, Tex};
+use crate::render::*;
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3, Direction, ICoord3};
 use crate::util::Id;
@@ -18,27 +18,30 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::array;
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use crate::util::OnceInit;
 
-/// The mesh templates that block models refer to, loaded from their `.ron` files.
-pub static BLOCK_MODEL_TEMPLATES: LazyLock<Registry<BlockModelTemplate>> = LazyLock::new(|| {
+/// The templates the block models are built from, loaded from
+/// `assets/models/block/templates`.
+pub(super) static BLOCK_MODEL_TEMPLATES: OnceInit<Registry<BlockModelTemplate>> = OnceInit::new();
+
+/// The textures of the blocks, loaded from `assets/textures/block`.
+pub(super) static BLOCK_TEXTURES: OnceInit<Registry<Tex>> = OnceInit::new();
+
+/// Builds the block model templates.
+pub(super) fn build_block_model_templates() -> Registry<BlockModelTemplate> {
     Registry::load_rons_from("assets/models/block/templates")
         .expect("failed to load block model templates")
-});
-
-/// The textures the block models sample, loaded from their png files.
-pub static BLOCK_TEXTURES: LazyLock<Registry<Tex>> = LazyLock::new(|| {
-    Registry::<Tex>::load_from("assets/textures/block").expect("failed to load block textures")
-});
-
-resources! {
-    /// The texture array that the block batch samples, which is built once the
-    /// canvas exists.
-    pub struct BlockTextures(BindSet<TextureArraySampler>);
 }
 
-/// The meshes one block type is drawn with, and the faces a solid neighbour
-/// culls.
+/// Builds the block textures.
+pub(super) fn build_block_textures() -> Registry<Tex> {
+    Registry::<Tex>::load_from("assets/textures/block").expect("failed to load block textures")
+}
+
+resources! {
+    pub(super) struct BlockTextures(BindSet<TextureArraySampler>);
+}
+
 #[derive(Clone, Default)]
 pub struct BlockModel {
     meshes: Vec<BlockModelPart>,
@@ -47,7 +50,6 @@ pub struct BlockModel {
     cull: [bool; 6],
 }
 
-/// One part of a block model: a template drawn with a texture.
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug)]
 pub struct BlockModelPart {
     pub template: Id,
@@ -62,23 +64,17 @@ struct RawBlockModelPart<'a> {
     texture: &'a str,
 }
 
-/// The mesh of one part of a block model, together with what the mesher needs to
-/// know about it.
 #[derive(Serialize, Deserialize)]
 #[serde(bound(deserialize = ""))]
 pub struct BlockModelTemplate {
     mesh: Mesh<NormUvVertex>,
-    /// Whether the mesh has to be drawn with the translucent pass.
     translucent: bool,
     /// The direction the mesh can be culled from, when it covers a whole face of
     /// a block.
     cull: Option<Direction>,
-    /// The axes along which neighbouring copies of this template may be merged.
     spans: SmallVec<[MergeSpan; 2]>,
 }
 
-/// One axis along which a template may be merged.
-///
 /// `ends` lists the vertices that have to be moved when the face is stretched,
 /// and `uv_unit` is how far the uv of those vertices advances per block.
 #[derive(Serialize, Deserialize)]
@@ -215,7 +211,6 @@ impl BlockModelTemplate {
 }
 
 impl BlockModel {
-    /// Builds a model from its parts, recording the faces that are culled.
     pub fn new(meshes: Vec<BlockModelPart>) -> Self {
         let mut cull = [false; 6];
 
@@ -229,12 +224,10 @@ impl BlockModel {
         Self { meshes, cull }
     }
 
-    /// A model without parts, which is what air and empty blocks use.
     pub fn empty() -> Self {
         Self::default()
     }
 
-    /// Returns whether an opaque neighbour in `dir` hides this model.
     fn culls(&self, dir: Direction) -> bool {
         self.cull[dir.idx()]
     }
@@ -249,7 +242,6 @@ pub struct MeshingTask {
     pub tx: Sender<MeshingResult>,
 }
 
-/// The meshes of a chunk that finished meshing.
 pub struct MeshingResult {
     pub lod: u8,
     pub pos: Option<SubRegionPos>,
@@ -257,7 +249,6 @@ pub struct MeshingResult {
     pub occlusion: Mesh<AlphaVertex>,
 }
 
-/// The mesher, which owns the receiving end of the meshing queue.
 pub struct ChunkMesher {
     task_rx: Receiver<MeshingTask>,
 }
@@ -273,21 +264,16 @@ struct MeshMerger {
     side: u8,
     axes: [Axis; 3],
     two: bool,
-    /// Position the next search resumes from.
     current: (usize, u8),
 }
 
-/// The resource that owns the mesher, so that a system can drive it.
 impl Resource for ChunkMesher {}
 
 impl ChunkMesher {
-    /// Creates the mesher around the receiving end of the meshing queue.
     pub fn new(task_rx: Receiver<MeshingTask>) -> Self {
         Self { task_rx }
     }
 
-    /// Dispatches the queued meshing tasks onto the thread pools.
-    ///
     /// Sub-regions of the near levels of detail are meshed by the near pool, so
     /// that a queue of far regions cannot delay the geometry around the player.
     pub fn update(&mut self, threads: &WorldThreads) {
@@ -315,8 +301,6 @@ impl ChunkMesher {
         });
     }
 
-    /// Meshes one task and sends the result back to the region that asked for
-    /// it.
     fn perform(task: MeshingTask) {
         let (mut blocks, mut occlusion) = Self::build_meshes(&task.chunk);
 
@@ -549,8 +533,6 @@ impl Iterator for MeshMerger {
 }
 
 impl MeshMerger {
-    /// Creates a merger for a `side` by `side` plane whose merge axes are the
-    /// ones the template declares.
     fn new(side: u8, spans: &[MergeSpan]) -> Self {
         // The merge axes take the first slots of `axes`, so that the bit of a
         // position is its coordinate along the merge axis.
@@ -570,7 +552,6 @@ impl MeshMerger {
         }
     }
 
-    /// The position a bit of the plane stands for.
     #[inline]
     fn pos_of_bit(&self, bit: (usize, u8)) -> U8Vec3 {
         let (idx, bit) = bit;
@@ -582,7 +563,6 @@ impl MeshMerger {
             .with(self.axes[2], (idx / n) as u8)
     }
 
-    /// The bit a position stands for.
     #[inline]
     fn bit_of_pos(&self, pos: U8Vec3) -> (usize, u8) {
         debug_assert!(pos.x < self.side && pos.y < self.side && pos.z < self.side);
@@ -592,15 +572,13 @@ impl MeshMerger {
         (idx, pos.get(self.axes[0]))
     }
 
-    /// Marks the position as occupied.
     fn add(&mut self, pos: U8Vec3) {
         let (idx, bit) = self.bit_of_pos(pos);
         self.lines[idx] |= 1u64 << bit;
     }
 }
 
-/// Handles the meshing queue every tick.
-pub struct ChunkMeshing;
+pub(super) struct ChunkMeshing;
 
 impl System for ChunkMeshing {
     type CompQuery = ();

@@ -1,5 +1,4 @@
 use crate::util::Id;
-use anyhow::Result;
 use bimap::BiMap;
 use glam::{U8Vec3, USizeVec3};
 use log::error;
@@ -7,6 +6,7 @@ use serde::de::DeserializeOwned;
 use std::fs::File;
 use std::io::BufReader;
 use std::{fs, mem};
+use anyhow::anyhow;
 
 /// A set of [`Id`]s kept as a dense list plus a sparse lookup table.
 ///
@@ -19,7 +19,6 @@ pub struct SparseSet {
     sparse: Vec<Id>,
 }
 
-/// A map from [`Id`] to `T` whose values are stored in a dense vector.
 pub struct DenseMap<T> {
     ids: SparseSet,
     items: Vec<T>,
@@ -35,8 +34,6 @@ pub struct DenseMapIter<'a, T> {
     items: &'a [T],
 }
 
-/// Mutable iterator over a [`DenseMap`].
-///
 /// It holds a raw pointer because the items are lent out for a lifetime that
 /// outlives the borrow of the map, and because a shared borrow of the map is
 /// enough to hand out `&mut T`.
@@ -61,7 +58,6 @@ impl SparseSet {
         self.len() == 0
     }
 
-    /// The position of `id` in `dense`, or `None` when the id is not in the set.
     #[inline]
     pub fn find(&self, id: Id) -> Option<Id> {
         if let Some(&idx) = self.sparse.get(id as usize)
@@ -262,8 +258,6 @@ impl<'a, T: 'a> Iterator for DenseMapIterMut<'a, T> {
     }
 }
 
-/// A box of `T` sampled on a regular grid, indexed by positions in `0..size`.
-///
 /// Values are stored with `z` varying fastest, then `y`, then `x`, so a row
 /// along `z` is contiguous.
 #[derive(Clone)]
@@ -281,7 +275,6 @@ impl<T: Clone + Default> Volume<T> {
         }
     }
 
-    /// Copies the `size` sized sub-volume at `min` into a new volume.
     #[inline]
     pub fn part(&self, min: U8Vec3, size: U8Vec3) -> Volume<T> {
         let max = min + size;
@@ -331,7 +324,6 @@ impl<T: Clone> Volume<T> {
         }
     }
 
-    /// Writes `part` into this volume at `min`.
     #[inline]
     pub fn fit(&mut self, min: U8Vec3, part: &Volume<T>) {
         let max = min + part.size;
@@ -352,7 +344,6 @@ impl<T: Clone> Volume<T> {
 }
 
 impl<T> Volume<T> {
-    /// Builds a volume of `size` by calling `pos_to_item` for every position.
     pub fn from_fn<F: Fn(U8Vec3) -> T>(size: U8Vec3, pos_to_item: F) -> Self {
         let [w, h, d] = size.as_usizevec3().to_array();
         let total = w * h * d;
@@ -370,7 +361,6 @@ impl<T> Volume<T> {
         Self { size, vec }
     }
 
-    /// The index of `pos` in the backing vector.
     #[inline]
     pub fn idx_of_pos(&self, pos: U8Vec3) -> usize {
         debug_assert!(pos.x < self.size.x && pos.y < self.size.y && pos.z < self.size.z);
@@ -396,7 +386,6 @@ impl<T> Volume<T> {
         mem::replace(&mut self.vec[idx], value)
     }
 
-    /// Iterates the `z` oriented rows of the range `min..max`.
     #[inline]
     pub fn rows(&self, min: U8Vec3, max: U8Vec3) -> impl Iterator<Item = &[T]> + '_ {
         debug_assert!(max.x <= self.size.x && max.y <= self.size.y && max.z <= self.size.z);
@@ -414,8 +403,6 @@ impl<T> Volume<T> {
         })
     }
 
-    /// Mutably iterates the `z` oriented rows of the range `min..max`.
-    ///
     /// The rows are built from a raw pointer because they all alias the same
     /// vector; the ranges are disjoint by construction, so no row is handed out
     /// twice.
@@ -449,10 +436,27 @@ impl<T> Volume<T> {
     }
 }
 
-/// A collection of entries indexed by [`Id`], alongside each entry's name.
 pub struct Registry<T> {
     pub entries: Vec<T>,
     pub names: BiMap<Id, String>,
+}
+
+#[macro_export]
+macro_rules! id_of {
+    ($reg:expr, $name:expr) => {{
+        static CACHE: std::sync::OnceLock<$crate::util::Id> = std::sync::OnceLock::new();
+        *CACHE.get_or_init(|| $reg.id_of($name))
+    }};
+}
+
+
+#[macro_export]
+macro_rules! by_name {
+    ($reg:expr, $name:expr) => {{
+        static CACHE: std::sync::OnceLock<$crate::util::Id> = std::sync::OnceLock::new();
+        let id = *CACHE.get_or_init(|| $reg.id_of($name));
+        $reg.get(id)
+    }};
 }
 
 impl<T> Default for Registry<T> {
@@ -467,7 +471,7 @@ impl<T> Default for Registry<T> {
 impl<T: DeserializeOwned> Registry<T> {
     /// Loads every file of `path`, numbering the entries in the order the
     /// directory lists them.
-    pub fn load_rons_from(path: &str) -> Result<Self> {
+    pub fn load_rons_from(path: &str) -> anyhow::Result<Self> {
         let mut new = Self::new();
 
         let mut id = 0;
@@ -476,7 +480,7 @@ impl<T: DeserializeOwned> Registry<T> {
             if path.is_file() {
                 let name = path
                     .file_stem()
-                    .expect("path should have a file name")
+                    .ok_or(anyhow!("failed to get file name"))?
                     .to_string_lossy()
                     .into_owned();
                 let file = File::open(path)?;
@@ -496,8 +500,6 @@ impl<T> Registry<T> {
         Self::default()
     }
 
-    /// Adds `item` under `name`.
-    ///
     /// Ids must be registered in ascending order starting at zero, because the
     /// id of an entry is also its position in [`Self::entries`].
     pub fn register<S>(&mut self, id: Id, name: S, item: T)
@@ -515,7 +517,6 @@ impl<T> Registry<T> {
         }
     }
 
-    /// The id registered under `name`.
     #[inline]
     pub fn id_of(&self, name: &str) -> Id {
         *self
@@ -524,7 +525,6 @@ impl<T> Registry<T> {
             .unwrap_or_else(|| panic!("entry with name {} not found", name))
     }
 
-    /// The name registered for `id`.
     #[inline]
     pub fn name_of(&self, id: Id) -> &str {
         self.names
@@ -533,11 +533,24 @@ impl<T> Registry<T> {
             .as_str()
     }
 
-    /// The entry registered for `id`.
     #[inline]
     pub fn get(&self, id: Id) -> &T {
         self.entries
             .get(id as usize)
             .unwrap_or_else(|| panic!("entry with id {} not found", id))
+    }
+    
+    #[inline]
+    pub fn by_name(&self, name: &str) -> &T {
+        self.entries
+            .get(self.id_of(name) as usize)
+            .unwrap_or_else(|| panic!("entry with name {} not found", name))
+    }
+    
+    pub fn map<U, F: FnMut(&T) -> U>(&self, f: F) -> Registry<U> {
+        Registry {
+            entries: self.entries.iter().map(f).collect(),
+            names: self.names.clone(),
+        }
     }
 }

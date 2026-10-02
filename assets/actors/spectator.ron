@@ -1,0 +1,10 @@
+(
+    components: [
+        ("position", (16.0, 16.0, 16.0)),
+        ("rotation", (0.0, 0.0, 0.0)),
+        ("velocity", (0.0, 0.0, 0.0)),
+        ("speed", 0.5),
+        ("player_controlled", ()),
+        ("flight", ()),
+    ],
+)

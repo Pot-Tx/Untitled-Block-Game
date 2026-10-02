@@ -4,6 +4,7 @@ use glam::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
+use std::mem::offset_of;
 use wgpu::*;
 /// A vertex format, described by the attributes the shaders read.
 ///
@@ -162,7 +163,7 @@ impl Vertex for BasicVertex {
         array_stride: size_of::<Self>() as BufferAddress,
         step_mode: VertexStepMode::Vertex,
         attributes: &[VertexAttribute {
-            offset: 0,
+            offset: offset_of!(Self, pos) as BufferAddress,
             shader_location: 0,
             format: VertexFormat::Float32x3,
         }],
@@ -200,12 +201,12 @@ impl Vertex for NormVertex {
         step_mode: VertexStepMode::Vertex,
         attributes: &[
             VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: 0,
                 format: VertexFormat::Float32x3,
             },
             VertexAttribute {
-                offset: size_of::<Vec3>() as BufferAddress,
+                offset: offset_of!(Self, norm) as BufferAddress,
                 shader_location: 1,
                 format: VertexFormat::Float32x3,
             },
@@ -253,17 +254,17 @@ impl Vertex for TexVertex {
         step_mode: VertexStepMode::Vertex,
         attributes: &[
             VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: 0,
                 format: VertexFormat::Float32x3,
             },
             VertexAttribute {
-                offset: size_of::<Vec3>() as BufferAddress,
+                offset: offset_of!(Self, tex) as BufferAddress,
                 shader_location: 1,
                 format: VertexFormat::Uint32,
             },
             VertexAttribute {
-                offset: (size_of::<Vec3>() + size_of::<u32>()) as BufferAddress,
+                offset: offset_of!(Self, uv) as BufferAddress,
                 shader_location: 2,
                 format: VertexFormat::Float32x2,
             },
@@ -305,17 +306,17 @@ impl Vertex for NormUvVertex {
         step_mode: VertexStepMode::Vertex,
         attributes: &[
             VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: 0,
                 format: VertexFormat::Float32x3,
             },
             VertexAttribute {
-                offset: (size_of::<Vec3>()) as BufferAddress,
+                offset: offset_of!(Self, uv) as BufferAddress,
                 shader_location: 1,
                 format: VertexFormat::Float32x2,
             },
             VertexAttribute {
-                offset: (size_of::<Vec3>() + size_of::<Vec2>()) as BufferAddress,
+                offset: offset_of!(Self, norm) as BufferAddress,
                 shader_location: 2,
                 format: VertexFormat::Float32x3,
             },
@@ -349,22 +350,22 @@ impl Vertex for NormTexVertex {
         step_mode: VertexStepMode::Vertex,
         attributes: &[
             VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: 0,
                 format: VertexFormat::Float32x3,
             },
             VertexAttribute {
-                offset: size_of::<Vec3>() as BufferAddress,
+                offset: offset_of!(Self, tex) as BufferAddress,
                 shader_location: 1,
                 format: VertexFormat::Uint32,
             },
             VertexAttribute {
-                offset: (size_of::<Vec3>() + size_of::<u32>()) as BufferAddress,
+                offset: offset_of!(Self, uv) as BufferAddress,
                 shader_location: 2,
                 format: VertexFormat::Float32x2,
             },
             VertexAttribute {
-                offset: (size_of::<Vec3>() + size_of::<u32>() + size_of::<Vec2>()) as BufferAddress,
+                offset: offset_of!(Self, norm) as BufferAddress,
                 shader_location: 3,
                 format: VertexFormat::Float32x3,
             },
@@ -398,12 +399,12 @@ impl Vertex for AlphaVertex {
         step_mode: VertexStepMode::Vertex,
         attributes: &[
             VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: 0,
                 format: VertexFormat::Float32x3,
             },
             VertexAttribute {
-                offset: size_of::<Vec3>() as BufferAddress,
+                offset: offset_of!(Self, alpha) as BufferAddress,
                 shader_location: 1,
                 format: VertexFormat::Float32,
             },
@@ -429,7 +430,7 @@ impl Inst for TransInst {
             array_stride: size_of::<Self>() as BufferAddress,
             step_mode: VertexStepMode::Instance,
             attributes: &[VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: V::ATTRIBUTE_COUNT,
                 format: VertexFormat::Float32x3,
             }],
@@ -443,7 +444,7 @@ impl Inst for IntTransInst {
             array_stride: size_of::<Self>() as BufferAddress,
             step_mode: VertexStepMode::Instance,
             attributes: &[VertexAttribute {
-                offset: 0,
+                offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: V::ATTRIBUTE_COUNT,
                 format: VertexFormat::Sint32x3,
             }],

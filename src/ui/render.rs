@@ -12,12 +12,10 @@ use std::fs::File;
 use wgpu::*;
 
 /// Layer of the UI atlas holding a white pixel, used to draw plain quads.
-pub const UI_WHITE: Id = 0;
+const UI_WHITE: Id = 0;
 /// Layer of the UI atlas holding the crosshair.
-pub const UI_CROSSHAIR: Id = 1;
+const UI_CROSSHAIR: Id = 1;
 
-/// Number of layers in the UI texture array.
-const UI_TEXTURES: u32 = 2;
 /// Side length of the glyph atlas texture, and of the UI atlas.
 const ATLAS_SIZE: u32 = 1024;
 
@@ -87,18 +85,18 @@ impl TextAtlas {
     fn queue(&mut self, rect: AABB<Vec2>, z: f32, text: &UiText) {
         // The glyph brush anchors text by its alignment, so the position and the
         // bounds are taken from the rectangle the text is centred in.
-        let pos = Vec2::new(
-            match text.h_align {
-                HorizontalAlign::Left => rect.min.x,
-                HorizontalAlign::Center => rect.center().x,
-                HorizontalAlign::Right => rect.max.x,
-            },
-            match text.v_align {
-                VerticalAlign::Top => rect.min.y,
-                VerticalAlign::Center => rect.center().y,
-                VerticalAlign::Bottom => rect.max.y,
-            },
-        );
+        let (x, h_align) = match text.h_align {
+            UiHAlign::Left => (rect.min.x, HorizontalAlign::Left),
+            UiHAlign::Center => (rect.center().x, HorizontalAlign::Center),
+            UiHAlign::Right => (rect.max.x, HorizontalAlign::Right),
+        };
+        let (y, v_align) = match text.v_align {
+            UiVAlign::Top => (rect.min.y, VerticalAlign::Top),
+            UiVAlign::Center => (rect.center().y, VerticalAlign::Center),
+            UiVAlign::Bottom => (rect.max.y, VerticalAlign::Bottom),
+        };
+
+        let pos = Vec2::new(x, y);
         let bounds = rect.size();
 
         self.brush.queue(
@@ -107,8 +105,8 @@ impl TextAtlas {
                 .with_bounds((bounds.x, bounds.y))
                 .with_layout(
                     Layout::default()
-                        .h_align(text.h_align)
-                        .v_align(text.v_align),
+                        .h_align(h_align)
+                        .v_align(v_align),
                 )
                 .add_text(
                     Text::new(&text.text)
@@ -173,11 +171,13 @@ impl TextAtlas {
 ///
 /// The quads and the glyphs are collected per viewport, because the z of an
 /// element only has to be comparable with the elements of its own viewport.
-pub struct UiRenderer {
+pub(super) struct UiRenderer {
     desc: RenderDescriptor<'static>,
     quad_batch: RenderBatch<(Transformation, TextureArraySampler), (), UiInst>,
     text_batch: RenderBatch<(Transformation, TextureSampler), (), UiInst>,
     atlas: BindSet<TextureArraySampler>,
+    /// Number of layers of the atlas, which bounds the texture id of a sprite.
+    layers: u32,
     /// The identity transform of the fullscreen overlay, whose instances are
     /// already in normalised device coordinates.
     full: BindSet<Transformation>,
@@ -198,16 +198,15 @@ impl System for UiRenderer {
 
     fn update(
         &mut self,
-        entities: &EntityManager,
-        resources: &ResourceManager,
-    ) -> Result<Vec<Command>, QueryError> {
-        if let Some(frame) = resources.get_mut::<Option<Frame>>() {
-            let canvas = resources.get::<Canvas>();
-            let screens = resources.try_get::<ActiveScreens>()?;
-            let viewports = resources.try_get::<Viewports>()?;
-            let rects = entities.components.try_get::<UiRect>()?;
-            let sprites = entities.components.try_get::<UiSprite>()?;
-            let texts = entities.components.try_get::<UiText>()?;
+        comp: Self::CompQuery,
+        res: Self::ResQuery,
+    ) -> Vec<Command> {
+        let (canvas, frame, screens, viewports) = res.get();
+
+        if let Some(frame) = frame {
+            let rects = &comp.0;
+            let sprites = &comp.1;
+            let texts = &comp.2;
 
             // The depth of an item is normalised by the number of items, so the
             // items are counted before anything is laid out.
@@ -216,8 +215,8 @@ impl System for UiRenderer {
                 .iter()
                 .filter_map(|screen| screens.get(*screen))
                 .flat_map(|screen| &screen.entities)
-                .filter(|entity| rects.contains(**entity))
-                .map(|entity| sprites.contains(*entity) as usize + texts.contains(*entity) as usize)
+                .filter(|entity| rects.get(**entity).is_some())
+                .map(|entity| sprites.get(*entity).is_some() as usize + texts.get(*entity).is_some() as usize)
                 .sum::<usize>();
             let total = count + screens.pauses() as usize;
 
@@ -252,15 +251,20 @@ impl System for UiRenderer {
                 }
 
                 for entity in &instance.entities {
-                    let Some(rect) = rects.get::<UiRect>(*entity) else {
+                    let Some(rect) = rects.get(*entity) else {
                         continue;
                     };
 
-                    if let Some(sprite) = sprites.get::<UiSprite>(*entity) {
+                    if let Some(sprite) = sprites.get(*entity) {
+                        // A sprite that names a layer the atlas does not have
+                        // would sample the wrong texture, so the id is clamped;
+                        // debug builds point at the mistake instead.
+                        debug_assert!(sprite.tex < self.layers);
+
                         quads[view].push(UiInst {
-                            tex: sprite.tex.min(UI_TEXTURES - 1),
-                            min: rect.rect.min,
-                            max: rect.rect.max,
+                            tex: sprite.tex.min(self.layers - 1),
+                            min: rect.0.min,
+                            max: rect.0.max,
                             z: next_z(&mut layer),
                             min_uv: sprite.uv.min,
                             max_uv: sprite.uv.max,
@@ -268,8 +272,8 @@ impl System for UiRenderer {
                         });
                     }
 
-                    if let Some(text) = texts.get::<UiText>(*entity) {
-                        queued[view].push((rect.rect, next_z(&mut layer), text));
+                    if let Some(text) = texts.get(*entity) {
+                        queued[view].push((rect.0, next_z(&mut layer), text));
                     }
                 }
             }
@@ -317,7 +321,7 @@ impl System for UiRenderer {
             });
         }
 
-        Ok(Vec::new())
+        Vec::new()
     }
 }
 
@@ -342,6 +346,7 @@ impl UiRenderer {
         );
         textures.register(UI_CROSSHAIR, "crosshair", crosshair);
 
+        let layers = textures.entries.len() as u32;
         let atlas = textures.create_texture_sampler(canvas, "ui", false);
         // Maps the unit square onto the whole window, in normalised device
         // coordinates.
@@ -391,6 +396,7 @@ impl UiRenderer {
                 },
             ),
             atlas,
+            layers,
             full,
             quads: ViewPortAlignment::ALL
                 .iter()

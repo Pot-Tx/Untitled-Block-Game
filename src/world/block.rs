@@ -1,3 +1,4 @@
+use crate::id_of;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
@@ -6,13 +7,13 @@ use crate::world::BlockPos;
 use glam::Vec3;
 use std::fmt;
 use std::fmt::Debug;
-use std::sync::LazyLock;
+use crate::util::OnceInit;
 /// The block types of the game, in the order their ids are registered in.
-pub static BLOCK_TYPES: LazyLock<Registry<BlockType>> = LazyLock::new(build_block_types);
+pub static BLOCK_TYPES: OnceInit<Registry<BlockType>> = OnceInit::new();
 
 /// Builds the block types, taking the models of the blocks that have one from
 /// [`BLOCK_MODEL_TEMPLATES`](crate::world::model::BLOCK_MODEL_TEMPLATES).
-fn build_block_types() -> Registry<BlockType> {
+pub(super) fn build_block_types() -> Registry<BlockType> {
     let mut block_types = Registry::new();
     let models = Registry::<BlockModel>::load_rons_from("assets/models/block")
         .expect("failed to load block models");
@@ -27,7 +28,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let bricks = BlockType {
-        models: vec![models.get(models.id_of("bricks")).clone()],
+        models: vec![models.by_name("bricks").clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -39,7 +40,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let dirt = BlockType {
-        models: vec![models.get(models.id_of("dirt")).clone()],
+        models: vec![models.by_name("dirt").clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -51,7 +52,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let grass = BlockType {
-        models: vec![models.get(models.id_of("grass")).clone()],
+        models: vec![models.by_name("grass").clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -63,7 +64,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let log = BlockType {
-        models: vec![models.get(models.id_of("log")).clone()],
+        models: vec![models.by_name("log").clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -75,7 +76,7 @@ fn build_block_types() -> Registry<BlockType> {
     };
 
     let leaves = BlockType {
-        models: vec![models.get(models.id_of("leaves")).clone()],
+        models: vec![models.by_name("leaves").clone()],
         bounds: vec![vec![AABB {
             min: Vec3::ZERO,
             max: Vec3::ONE,
@@ -151,6 +152,7 @@ impl Debug for Block {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Block")
             .field("type_id", &self.type_id)
+            .field("type_name", &BLOCK_TYPES.name_of(self.type_id))
             .field("state", &self.state)
             .finish()
     }
@@ -160,14 +162,14 @@ impl Block {
     /// The block of the air type, which has no collisions and no model.
     #[inline]
     pub fn air() -> Self {
-        Self::default_of(0)
+        Self::default_of(id_of!(BLOCK_TYPES, "air"))
     }
 
     /// The block of type `type_id` in its default state.
     #[inline]
     pub fn default_of(type_id: Id) -> Self {
         let block_type = BLOCK_TYPES.get(type_id);
-
+        
         Self {
             type_id,
             block_type,

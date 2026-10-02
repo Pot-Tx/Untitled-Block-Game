@@ -13,7 +13,8 @@ mod texture;
 mod vertex;
 
 use crate::resources;
-use anyhow::{anyhow, Result};
+use crate::ecs::{ResourceManager, SystemManager};
+use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use std::marker::PhantomData;
@@ -36,14 +37,35 @@ pub static EMPTY_BUFFER_VEC: OnceInit<BufferVec<()>> = OnceInit::new();
 /// The index buffer that draws a single quad, shared by every quad batch.
 pub static QUAD_INDEX_BUFFER_VEC: OnceInit<BufferVec<u16>> = OnceInit::new();
 
-/// Creates [`EMPTY_BUFFER_VEC`], which needs a [`Canvas`] to exist.
-pub fn create_empty_buffer_vec(canvas: &Canvas) -> BufferVec<()> {
-    BufferVec::vertex(canvas, "empty", BufferInit::Size(0))
+impl BufferVec<()> {
+    /// Creates [`EMPTY_BUFFER_VEC`], which needs a [`Canvas`] to exist.
+    pub fn empty(canvas: &Canvas) -> Self {
+        Self::vertex(canvas, "empty", BufferInit::Size(0))
+    }
 }
 
-/// Creates [`QUAD_INDEX_BUFFER_VEC`], which needs a [`Canvas`] to exist.
-pub fn create_quad_index_buffer_vec(canvas: &Canvas) -> BufferVec<u16> {
-    BufferVec::index(canvas, "quad", BufferInit::Content(&QUAD_INDICES))
+impl BufferVec<u16> {
+    /// Creates [`QUAD_INDEX_BUFFER_VEC`], which needs a [`Canvas`] to exist.
+    pub fn quad_index(canvas: &Canvas) -> Self {
+        Self::index(canvas, "quad", BufferInit::Content(&QUAD_INDICES))
+    }
+}
+
+/// Initialises the globals of the renderer and registers its resources, which
+/// need a window to exist.
+pub(crate) fn init(resources: &mut ResourceManager, canvas: &Canvas) {
+    EMPTY_BUFFER_VEC.init(BufferVec::empty(canvas));
+    QUAD_INDEX_BUFFER_VEC.init(BufferVec::quad_index(canvas));
+
+    resources.register("camera", Camera::new(canvas));
+}
+
+/// Registers the resources and the systems of the renderer.
+pub(crate) fn register(frame: &mut SystemManager, resources: &mut ResourceManager) {
+    resources.register::<Option<Frame>>("frame", None);
+    resources.register("partial_tick", PartialTick(0.0));
+
+    frame.register(2, "camera_transformer", CameraTransformer);
 }
 
 /// A drawable geometry, described as vertex, index and instance buffers.
@@ -85,7 +107,7 @@ impl<'a, V: Vertex, I: Inst> RenderItem<'a, V, I> {
         vertices: &'a BufferVec<V>,
         indices: &'a BufferVec<u16>,
         instances: &'a BufferVec<I>,
-    ) -> Result<Self> {
+    ) -> anyhow::Result<Self> {
         if indices.length == 0 {
             return Err(anyhow!("index buffer should not be empty"));
         }

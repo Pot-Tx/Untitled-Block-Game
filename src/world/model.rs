@@ -39,7 +39,7 @@ pub(super) fn build_block_textures() -> Registry<Tex> {
 }
 
 resources! {
-    pub(super) struct BlockTextures(BindSet<TextureArraySampler>);
+    pub(crate) struct BlockTextures(BindSet<TextureArraySampler>);
 }
 
 #[derive(Clone, Default)]
@@ -222,6 +222,24 @@ impl BlockModel {
         }
 
         Self { meshes, cull }
+    }
+
+    /// The mesh the model is drawn with, in block coordinates, with the texture
+    /// of every part.
+    ///
+    /// The faces are neither culled nor merged, unlike the meshes of a chunk,
+    /// because a single block has no neighbours to cull them against.
+    pub(crate) fn mesh(&self) -> Mesh<NormTexVertex> {
+        self.meshes
+            .iter()
+            .map(|part| {
+                BLOCK_MODEL_TEMPLATES
+                    .get(part.template)
+                    .mesh
+                    .with_texture(part.texture)
+            })
+            .collect::<Vec<_>>()
+            .merge()
     }
 
     pub fn empty() -> Self {

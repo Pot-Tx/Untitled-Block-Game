@@ -177,6 +177,7 @@ impl InputState {
     /// Clears the state that only lasts one frame.
     pub fn clear(&mut self) {
         self.mouse_motion = Vec2::ZERO;
+        self.mouse_scroll = Vec2::ZERO;
         self.just_pressed_keys.clear();
         self.just_released_keys.clear();
         self.just_pressed_buttons.clear();

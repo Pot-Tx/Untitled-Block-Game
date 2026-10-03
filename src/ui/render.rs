@@ -4,10 +4,13 @@ use crate::ui::*;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
-use glam::{Mat4, Vec2};
+use crate::world::{Block, BlockTextures, Meta};
+use glam::camera::rh::view::look_at_mat4;
+use glam::{Mat4, Vec2, Vec3};
 use glyph_brush::ab_glyph::FontArc;
 use glyph_brush::*;
 use log::error;
+use std::collections::HashMap;
 use std::fs::File;
 use wgpu::*;
 
@@ -18,6 +21,14 @@ const UI_CROSSHAIR: Id = 1;
 
 /// Side length of the glyph atlas texture, and of the UI atlas.
 const ATLAS_SIZE: u32 = 1024;
+
+/// How much of the depth of an element the faces of its block use.
+///
+/// The faces have to differ in depth, because two fragments of the same depth
+/// fail the `Greater` comparison the batches use; the band stays well below the
+/// step between the depths of two elements, so a block never reaches into the
+/// layer of the element in front of it.
+const BLOCK_DEPTH: f32 = 1.0e-4;
 
 /// The glyph atlas of the text batch, together with the brush that fills it.
 struct TextAtlas {
@@ -175,6 +186,17 @@ pub(super) struct UiRenderer {
     desc: RenderDescriptor<'static>,
     quad_batch: RenderBatch<(Transformation, TextureArraySampler), (), UiInst>,
     text_batch: RenderBatch<(Transformation, TextureSampler), (), UiInst>,
+    block_batch: RenderBatch<
+        (TextureArraySampler, Transformation, Transformation),
+        NormTexVertex,
+        UiBlockInst,
+    >,
+    /// The camera every block of the interface is seen through. It never
+    /// changes, so it is uploaded once and shared by every block.
+    block_camera: BindSet<Transformation>,
+    /// One mesh per block the interface shows, with the rectangles of the
+    /// elements that show it.
+    blocks: HashMap<Meta, UiBlockModel>,
     atlas: BindSet<TextureArraySampler>,
     /// Number of layers of the atlas, which bounds the texture id of a sprite.
     layers: u32,
@@ -188,12 +210,18 @@ pub(super) struct UiRenderer {
 }
 
 impl System for UiRenderer {
-    type CompQuery = (CompRead<UiRect>, CompRead<UiSprite>, CompRead<UiText>);
+    type CompQuery = (
+        CompRead<UiRect>,
+        CompRead<UiSprite>,
+        CompRead<UiText>,
+        OptionalRead<UiBlock>,
+    );
     type ResQuery = (
         ResRead<Canvas>,
         ResWrite<Option<Frame>>,
         ResRead<ActiveScreens>,
         ResRead<Viewports>,
+        ResRead<BlockTextures>,
     );
 
     fn update(
@@ -201,12 +229,13 @@ impl System for UiRenderer {
         comp: Self::CompQuery,
         res: Self::ResQuery,
     ) -> Vec<Command> {
-        let (canvas, frame, screens, viewports) = res.get();
+        let (canvas, frame, screens, viewports, block_textures) = res.get();
 
         if let Some(frame) = frame {
             let rects = &comp.0;
             let sprites = &comp.1;
             let texts = &comp.2;
+            let blocks = &comp.3;
 
             // The depth of an item is normalised by the number of items, so the
             // items are counted before anything is laid out.
@@ -216,7 +245,11 @@ impl System for UiRenderer {
                 .filter_map(|screen| screens.get(*screen))
                 .flat_map(|screen| &screen.entities)
                 .filter(|entity| rects.get(**entity).is_some())
-                .map(|entity| sprites.get(*entity).is_some() as usize + texts.get(*entity).is_some() as usize)
+                .map(|entity| {
+                    sprites.get(*entity).is_some() as usize
+                        + texts.get(*entity).is_some() as usize
+                        + blocks.get(*entity).flatten().is_some() as usize
+                })
                 .sum::<usize>();
             let total = count + screens.pauses() as usize;
 
@@ -229,6 +262,8 @@ impl System for UiRenderer {
 
             let mut quads = vec![Vec::new(); ViewPortAlignment::ALL.len()];
             let mut queued = vec![Vec::new(); ViewPortAlignment::ALL.len()];
+            let mut shown = vec![HashMap::<Meta, (Block, Vec<UiBlockInst>)>::new();
+                ViewPortAlignment::ALL.len()];
             let mut dim = Vec::new();
 
             for screen in &screens.order {
@@ -275,6 +310,21 @@ impl System for UiRenderer {
                     if let Some(text) = texts.get(*entity) {
                         queued[view].push((rect.0, next_z(&mut layer), text));
                     }
+
+                    if let Some(block) = blocks.get(*entity).flatten() {
+                        let z = next_z(&mut layer);
+
+                        shown[view]
+                            .entry(block.0.to_meta())
+                            .or_insert_with(|| (block.0, Vec::new()))
+                            .1
+                            .push(UiBlockInst {
+                                min: rect.0.min,
+                                max: rect.0.max,
+                                min_z: z,
+                                max_z: z + BLOCK_DEPTH,
+                            });
+                    }
                 }
             }
 
@@ -282,6 +332,19 @@ impl System for UiRenderer {
                 buffer.set_content(canvas, &quads[view]);
             }
             self.dim.set_content(canvas, &dim);
+
+            self.blocks
+                .retain(|meta, _| shown.iter().any(|view| view.contains_key(meta)));
+
+            for (view, blocks) in shown.iter().enumerate() {
+                for (meta, (block, instances)) in blocks {
+                    self.blocks
+                        .entry(*meta)
+                        .or_insert_with(|| UiBlockModel::new(canvas, *block))
+                        .instances[view]
+                        .set_content(canvas, instances);
+                }
+            }
 
             for (view, buffer) in self.glyphs.iter_mut().enumerate() {
                 queued[view]
@@ -308,6 +371,14 @@ impl System for UiRenderer {
                     self.quad_batch
                         .push(&mut pass, (&viewport.transform, &self.atlas));
                     self.quad_batch.draw(&mut pass, &UiList(&self.quads[view]));
+                    
+                    self.block_batch.begin(&mut pass);
+                    self.block_batch.push(
+                        &mut pass,
+                        (&block_textures.0, &self.block_camera, &viewport.transform),
+                    );
+                    self.block_batch
+                        .draw(&mut pass, &UiBlocks(&self.blocks, view));
 
                     self.text_batch.begin(&mut pass);
                     self.text_batch
@@ -369,6 +440,24 @@ impl UiRenderer {
             },
         );
 
+        // The camera of the blocks never changes, so its matrix is uploaded
+        // once, unlike the one of the world camera.
+        let block_camera_buffer = Buffer::new(
+            canvas,
+            &BufferConfig {
+                name: "ui_block_camera",
+                init: BufferInit::Content(&[Self::block_camera()]),
+                usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            },
+        );
+        let block_camera = BindSet::new(
+            canvas,
+            &BindSetConfig {
+                name: "ui_block_camera",
+                content: &block_camera_buffer,
+            },
+        );
+
         Self {
             desc: RenderDescriptor {
                 name: "ui",
@@ -395,6 +484,20 @@ impl UiRenderer {
                     depth_write: true,
                 },
             ),
+            block_batch: RenderBatch::new(
+                canvas,
+                &RenderBatchConfig {
+                    name: "ui_block",
+                    shader: "ui_block",
+                    // Blocks are drawn opaque; translucent ones would need a
+                    // batch of their own, drawn after the opaque geometry.
+                    translucent: false,
+                    topology: PrimitiveTopology::TriangleList,
+                    depth_write: true,
+                },
+            ),
+            block_camera,
+            blocks: HashMap::new(),
             atlas,
             layers,
             full,
@@ -410,6 +513,40 @@ impl UiRenderer {
             text: TextAtlas::new(canvas),
         }
     }
+
+    /// The transform of the camera every block of the interface is seen
+    /// through: an orthographic view from outside the `(1, 1, 1)` corner of the
+    /// block, looking back down the diagonal at its center.
+    fn block_camera() -> Mat4 {
+        // The eye sits one block diagonal beyond the `(1, 1, 1)` corner, along
+        // the direction it looks back in.
+        let distance = 1.0;
+        let eye = Vec3::ONE + Vec3::ONE * distance;
+        let view = look_at_mat4(eye, Vec3::splat(0.5), Vec3::Y);
+
+        // The `(1, 1, 1)` corner is the closest point of the block to the eye
+        // and the `(0, 0, 0)` corner the farthest, so the frustum has to cover
+        // that range, with a margin in front of the closer one.
+        let near = distance * 3.0f32.sqrt() - 0.125;
+        let far = distance * 3.0f32.sqrt() + 2.0 * 3.0f32.sqrt() + 0.125;
+
+        // A unit block seen along its space diagonal is a regular hexagon of
+        // radius sqrt(2/3), so this half extent leaves a small margin around it.
+        let radius = (2.0f32 / 3.0).sqrt() * 1.05;
+
+        // The projection flips y, because the space of a viewport grows
+        // downwards. Its depth is reversed, like the projection of the world
+        // camera: the near plane maps to 1 and the far plane to 0, which
+        // matches the `Greater` comparison the batches use.
+        let proj = Mat4::from_cols_array(&[
+            1.0 / radius, 0.0, 0.0, 0.0,
+            0.0, -1.0 / radius, 0.0, 0.0,
+            0.0, 0.0, 1.0 / (far - near), 0.0,
+            0.0, 0.0, far / (far - near), 1.0,
+        ]);
+
+        proj * view
+    }
 }
 
 /// The instances of one viewport, as geometry that a UI batch can draw.
@@ -424,5 +561,47 @@ impl Render<(), UiInst> for UiList<'_> {
         }
 
         items
+    }
+}
+
+/// The geometry of one block, together with the rectangles of the elements that
+/// show it.
+struct UiBlockModel {
+    vertices: BufferVec<NormTexVertex>,
+    indices: BufferVec<u16>,
+    /// The rectangles of the elements that show this block, one buffer per
+    /// viewport, because the depths of an element are only comparable with the
+    /// elements of its own viewport.
+    instances: Vec<BufferVec<UiBlockInst>>,
+}
+
+impl UiBlockModel {
+    /// Uploads the mesh of `block`, leaving room for the rectangles of the
+    /// elements that show it.
+    fn new(canvas: &Canvas, block: Block) -> Self {
+        let mesh = block.mesh();
+
+        Self {
+            vertices: mesh.vertex_buffer(canvas, "ui_block"),
+            indices: mesh.index_buffer_vec(canvas, "ui_block"),
+            instances: ViewPortAlignment::ALL
+                .iter()
+                .map(|_| BufferVec::instance(canvas, "ui_block", BufferInit::Size(0)))
+                .collect(),
+        }
+    }
+}
+
+/// The blocks of one viewport, as geometry that the block batch draws.
+struct UiBlocks<'a>(&'a HashMap<Meta, UiBlockModel>, usize);
+
+impl Render<NormTexVertex, UiBlockInst> for UiBlocks<'_> {
+    fn rendered(&self) -> Vec<RenderItem<'_, NormTexVertex, UiBlockInst>> {
+        self.0
+            .values()
+            .filter_map(|model| {
+                RenderItem::new(&model.vertices, &model.indices, &model.instances[self.1]).ok()
+            })
+            .collect()
     }
 }

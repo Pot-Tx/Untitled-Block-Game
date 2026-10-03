@@ -18,9 +18,10 @@ use crate::id_of;
 use crate::render::{Canvas, Inst, Vertex, Viewports};
 use crate::util::bounding::AABB;
 use crate::util::Id;
+use crate::world::Block;
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
-use serde::{Deserialize, Serialize};
+use serde::{Serialize, Deserialize};
 use std::mem::offset_of;
 use wgpu::*;
 
@@ -48,7 +49,18 @@ components! {
     /// Marks an element as part of a screen, and orders it inside that screen.
     #[derive(Clone, Copy)]
     pub struct ScreenTag { pub screen: Id, pub priority: u32 }: Hot;
+
+    /// A block drawn inside a UI element, filling the element's rectangle.
+    #[derive(Clone, Copy, Serialize, Deserialize)]
+    pub struct UiBlock(Block): Cold, data;
 }
+
+/// A block as it is written to a data file: the name of its type and its state,
+/// so that the block types can be reordered without breaking the files.
+///
+/// The state is left out for a block in the default state of its type; RON
+/// writes `Option` as `Some` or `None`, so any other state is written as
+/// `state: Some(n)`.
 
 /// The horizontal alignment of a piece of UI text.
 ///
@@ -71,11 +83,12 @@ pub enum UiVAlign {
 
 /// Registers the components of a screen element.
 fn register_components(components: &mut ComponentManager) {
-    components.register::<UiRect>("ui_rect");
-    components.register::<UiSprite>("ui_sprite");
-    components.register::<UiText>("ui_text");
+    components.register::<UiRect>("rect");
+    components.register::<UiSprite>("sprite");
+    components.register::<UiText>("text");
     components.register::<ScreenTag>("screen_tag");
     components.register::<Triggers>("trigger_tag");
+    components.register::<UiBlock>("block");
 }
 
 /// Registers the components, the resources, the systems and the data of the
@@ -187,6 +200,52 @@ impl Inst for UiInst {
                     offset: offset_of!(Self, color) as BufferAddress,
                     shader_location: V::ATTRIBUTE_COUNT + 6,
                     format: VertexFormat::Float32x4,
+                },
+            ],
+        })
+    }
+}
+
+/// The instance data of one UI block: the rectangle of its element and the
+/// range of depths the block itself is drawn in.
+///
+/// The camera of the block maps the depth of a vertex between `min_z` and
+/// `max_z`, so that the block keeps the order of its own faces while it stays
+/// inside the layer of its element.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+pub struct UiBlockInst {
+    pub min: Vec2,
+    pub max: Vec2,
+    pub min_z: f32,
+    pub max_z: f32,
+}
+
+impl Inst for UiBlockInst {
+    fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
+        Some(VertexBufferLayout {
+            array_stride: size_of::<Self>() as BufferAddress,
+            step_mode: VertexStepMode::Instance,
+            attributes: &[
+                VertexAttribute {
+                    offset: offset_of!(Self, min) as BufferAddress,
+                    shader_location: V::ATTRIBUTE_COUNT,
+                    format: VertexFormat::Float32x2,
+                },
+                VertexAttribute {
+                    offset: offset_of!(Self, max) as BufferAddress,
+                    shader_location: V::ATTRIBUTE_COUNT + 1,
+                    format: VertexFormat::Float32x2,
+                },
+                VertexAttribute {
+                    offset: offset_of!(Self, min_z) as BufferAddress,
+                    shader_location: V::ATTRIBUTE_COUNT + 2,
+                    format: VertexFormat::Float32,
+                },
+                VertexAttribute {
+                    offset: offset_of!(Self, max_z) as BufferAddress,
+                    shader_location: V::ATTRIBUTE_COUNT + 3,
+                    format: VertexFormat::Float32,
                 },
             ],
         })

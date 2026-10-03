@@ -1,4 +1,5 @@
 use crate::id_of;
+use crate::render::{Mesh, NormTexVertex};
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
 use crate::util::Id;
@@ -7,6 +8,7 @@ use crate::world::BlockPos;
 use glam::Vec3;
 use std::fmt;
 use std::fmt::Debug;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::util::OnceInit;
 /// The block types of the game, in the order their ids are registered in.
 pub static BLOCK_TYPES: OnceInit<Registry<BlockType>> = OnceInit::new();
@@ -21,8 +23,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
     let air = BlockType {
         models: vec![BlockModel::empty()],
         bounds: vec![vec![]],
-        model_idx_of_state: |_| -> usize { 0 },
-        bounds_idx_of_state: |_| -> usize { 0 },
+        state_models: [0; 16],
+        state_bounds: [0; 16],
         opacity: Vec3::ZERO,
         default_state: 0,
     };
@@ -33,8 +35,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
             min: Vec3::ZERO,
             max: Vec3::ONE,
         }]],
-        model_idx_of_state: |_| -> usize { 0 },
-        bounds_idx_of_state: |_| -> usize { 0 },
+        state_models: [0; 16],
+        state_bounds: [0; 16],
         opacity: Vec3::ONE,
         default_state: 0,
     };
@@ -45,8 +47,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
             min: Vec3::ZERO,
             max: Vec3::ONE,
         }]],
-        model_idx_of_state: |_| -> usize { 0 },
-        bounds_idx_of_state: |_| -> usize { 0 },
+        state_models: [0; 16],
+        state_bounds: [0; 16],
         opacity: Vec3::ONE,
         default_state: 0,
     };
@@ -57,8 +59,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
             min: Vec3::ZERO,
             max: Vec3::ONE,
         }]],
-        model_idx_of_state: |_| -> usize { 0 },
-        bounds_idx_of_state: |_| -> usize { 0 },
+        state_models: [0; 16],
+        state_bounds: [0; 16],
         opacity: Vec3::ONE,
         default_state: 0,
     };
@@ -69,8 +71,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
             min: Vec3::ZERO,
             max: Vec3::ONE,
         }]],
-        model_idx_of_state: |_| -> usize { 0 },
-        bounds_idx_of_state: |_| -> usize { 0 },
+        state_models: [0; 16],
+        state_bounds: [0; 16],
         opacity: Vec3::ONE,
         default_state: 0,
     };
@@ -81,8 +83,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
             min: Vec3::ZERO,
             max: Vec3::ONE,
         }]],
-        model_idx_of_state: |_| -> usize { 0 },
-        bounds_idx_of_state: |_| -> usize { 0 },
+        state_models: [0; 16],
+        state_bounds: [0; 16],
         opacity: Vec3::ONE,
         default_state: 0,
     };
@@ -113,9 +115,9 @@ pub struct BlockType {
     /// The collision boxes for every state, in block coordinates.
     pub bounds: Vec<Vec<AABB<Vec3>>>,
     /// Selects the model that belongs to a state.
-    pub model_idx_of_state: fn(State) -> usize,
+    pub state_models: [u8; 16],
     /// Selects the collision boxes that belong to a state.
-    pub bounds_idx_of_state: fn(State) -> usize,
+    pub state_bounds: [u8; 16],
     /// How much the block dims the light on each axis, where zero is fully
     /// transparent.
     pub opacity: Vec3,
@@ -131,13 +133,11 @@ pub struct Block {
     pub state: State,
 }
 
-/// One property of a block, stored as a part of its state.
-pub trait Property {
-    type Output;
-
-    fn default_value() -> Self::Output;
-    fn get_value_from_state(state: State) -> Self::Output;
-    fn push_value_to_state(value: Self::Output, state: State) -> State;
+#[derive(Serialize, Deserialize)]
+pub struct RawBlock<'a> {
+    block: &'a str,
+    #[serde(default)]
+    state: State,
 }
 
 impl Eq for Block {}
@@ -145,6 +145,29 @@ impl Eq for Block {}
 impl PartialEq<Self> for Block {
     fn eq(&self, other: &Self) -> bool {
         self.type_id == other.type_id && self.state == other.state
+    }
+}
+
+impl Serialize for Block {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        RawBlock {
+            block: BLOCK_TYPES.name_of(self.type_id),
+            state: self.state,
+        }
+            .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Block {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = RawBlock::deserialize(deserializer)?;
+        let type_id = BLOCK_TYPES.id_of(raw.block);
+        
+        Ok(Self {
+            type_id,
+            block_type: BLOCK_TYPES.get(type_id),
+            state: raw.state,
+        })
     }
 }
 
@@ -190,43 +213,36 @@ impl Block {
 
     /// The chunk entry that stands for this block.
     #[inline]
-    pub fn to_meta(&self) -> Meta {
+    pub fn to_meta(self) -> Meta {
         self.type_id as Meta + ((self.state as Meta) << 12)
-    }
-
-    /// The value of the property `P` in the state of this block.
-    #[inline]
-    pub fn get_property<P: Property>(&self) -> P::Output {
-        P::get_value_from_state(self.state)
-    }
-
-    /// Stores the value of `P` in the state of this block.
-    #[inline]
-    pub fn set_property<P: Property>(&mut self, value: P::Output) -> &mut Self {
-        self.state = P::push_value_to_state(value, self.state);
-        self
     }
 
     /// The block with the value of `P` set, leaving this one unchanged.
     #[inline]
-    pub fn with_property<P: Property>(&self, value: P::Output) -> Self {
-        let mut state = *self;
-        state.set_property::<P>(value);
-        state
+    #[must_use]
+    pub fn with_state(mut self, state: State) -> Self {
+        self.state = state;
+        self
     }
 
     /// The model this block is drawn with.
     #[inline]
     pub fn model(&self) -> &BlockModel {
         let block_type = self.block_type;
-        &block_type.models[(block_type.model_idx_of_state)(self.state)]
+        &block_type.models[block_type.state_models[self.state as usize] as usize]
+    }
+
+    /// The mesh of this block in its current state, in block coordinates.
+    #[inline]
+    pub fn mesh(&self) -> Mesh<NormTexVertex> {
+        self.model().mesh()
     }
 
     /// The collision boxes of this block, in world coordinates.
     #[inline]
     pub fn bounds(&self, pos: BlockPos) -> Vec<AABB<Vec3>> {
         let block_type = self.block_type;
-        block_type.bounds[(block_type.bounds_idx_of_state)(self.state)]
+        block_type.bounds[block_type.state_bounds[self.state as usize] as usize]
             .iter()
             .map(|b| b.translate(pos.as_vec3()))
             .collect()

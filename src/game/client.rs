@@ -183,9 +183,12 @@ impl GameClient {
     /// Registers the components, the systems, the resources and the data of
     /// the game, which the window is not needed for.
     ///
-    /// The systems are registered by stage: systems of the same stage run in
-    /// parallel unless their accesses overlap, and a lower stage finishes
-    /// before the next one starts.
+    /// The modules register in the order their data depends on each other: the
+    /// blocks come before the screens, because a screen names the block of an
+    /// element, and the systems come before the screens too, because a screen
+    /// names the systems that handle its triggers. Within a stage the systems
+    /// run in parallel unless their accesses overlap, and a lower stage
+    /// finishes before the next one starts.
     pub(crate) fn setup(&mut self) {
         crate::actor::register(
             &mut self.entities,
@@ -194,12 +197,12 @@ impl GameClient {
         );
         crate::game::register(&mut self.frame_systems, &mut self.resources);
         crate::render::register(&mut self.frame_systems, &mut self.resources);
+        crate::world::register(&mut self.tick_systems, &mut self.resources);
         crate::ui::register(
             &mut self.ui_entities,
             &mut self.ui_systems,
             &mut self.resources,
         );
-        crate::world::register(&mut self.tick_systems, &mut self.resources);
 
         self.register_world();
     }

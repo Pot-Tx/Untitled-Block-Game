@@ -1,0 +1,25 @@
+[(
+    template: "cube_w",
+    texture: "lamp",
+    material: "lamp",
+), (
+    template: "cube_e",
+    texture: "lamp",
+    material: "lamp",
+), (
+    template: "cube_d",
+    texture: "lamp",
+    material: "lamp",
+), (
+    template: "cube_u",
+    texture: "lamp",
+    material: "lamp",
+), (
+    template: "cube_n",
+    texture: "lamp",
+    material: "lamp",
+), (
+    template: "cube_s",
+    texture: "lamp",
+    material: "lamp",
+)]

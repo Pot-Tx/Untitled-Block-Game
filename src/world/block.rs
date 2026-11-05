@@ -1,32 +1,33 @@
 use crate::id_of;
 use crate::render::{Mesh, NormTexVertex};
-use crate::util::bounding::AABB;
-use crate::util::collection::Registry;
 use crate::util::Id;
+use crate::util::OnceInit;
+use crate::util::bounding::AABB;
+use crate::util::collection::{Registry, Volume};
 use crate::world::model::BlockModel;
-use crate::world::BlockPos;
-use glam::Vec3;
+use crate::world::{BlockPos, Emission};
+use glam::{U8Vec3, Vec3};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fmt::Debug;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use crate::util::OnceInit;
+use std::ops::{Deref, DerefMut};
+
 /// The block types of the game, in the order their ids are registered in.
 pub static BLOCK_TYPES: OnceInit<Registry<BlockType>> = OnceInit::new();
 
 /// Builds the block types, taking the models of the blocks that have one from
 /// [`BLOCK_MODEL_TEMPLATES`](crate::world::model::BLOCK_MODEL_TEMPLATES).
-pub(super) fn build_block_types() -> Registry<BlockType> {
+pub(super) fn init_block_types() -> anyhow::Result<()> {
     let mut block_types = Registry::new();
-    let models = Registry::<BlockModel>::load_rons_from("assets/models/block")
-        .expect("failed to load block models");
+    let models = Registry::<BlockModel>::load_rons_from("assets/models/block")?;
 
     let air = BlockType {
         models: vec![BlockModel::empty()],
         bounds: vec![vec![]],
         state_models: [0; 16],
         state_bounds: [0; 16],
-        opacity: Vec3::ZERO,
-        default_state: 0,
+        emission: None,
+        default_state: BlockState::DEFAULT,
     };
 
     let bricks = BlockType {
@@ -37,8 +38,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
         }]],
         state_models: [0; 16],
         state_bounds: [0; 16],
-        opacity: Vec3::ONE,
-        default_state: 0,
+        emission: None,
+        default_state: BlockState::DEFAULT,
     };
 
     let dirt = BlockType {
@@ -49,8 +50,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
         }]],
         state_models: [0; 16],
         state_bounds: [0; 16],
-        opacity: Vec3::ONE,
-        default_state: 0,
+        emission: None,
+        default_state: BlockState::DEFAULT,
     };
 
     let grass = BlockType {
@@ -61,8 +62,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
         }]],
         state_models: [0; 16],
         state_bounds: [0; 16],
-        opacity: Vec3::ONE,
-        default_state: 0,
+        emission: None,
+        default_state: BlockState::DEFAULT,
     };
 
     let log = BlockType {
@@ -73,8 +74,8 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
         }]],
         state_models: [0; 16],
         state_bounds: [0; 16],
-        opacity: Vec3::ONE,
-        default_state: 0,
+        emission: None,
+        default_state: BlockState::DEFAULT,
     };
 
     let leaves = BlockType {
@@ -85,8 +86,40 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
         }]],
         state_models: [0; 16],
         state_bounds: [0; 16],
-        opacity: Vec3::ONE,
-        default_state: 0,
+        emission: None,
+        default_state: BlockState::DEFAULT,
+    };
+
+    let lamp = BlockType {
+        models: vec![models.by_name("lamp").clone()],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
+        state_models: [0; 16],
+        state_bounds: [0; 16],
+        emission: Some(Emission {
+            offset: Vec3::splat(0.5),
+            direction: Vec3::ZERO,
+            color: Vec3::new(1.0, 0.55, 0.2),
+            intensity: 1.5,
+            range: 12.0,
+            inner_cos: 1.0,
+            outer_cos: -1.0,
+        }),
+        default_state: BlockState::DEFAULT,
+    };
+
+    let red_glass = BlockType {
+        models: vec![models.by_name("red_glass").clone()],
+        bounds: vec![vec![AABB {
+            min: Vec3::ZERO,
+            max: Vec3::ONE,
+        }]],
+        state_models: [0; 16],
+        state_bounds: [0; 16],
+        emission: None,
+        default_state: BlockState::DEFAULT,
     };
 
     block_types.register(0, "air", air);
@@ -95,17 +128,200 @@ pub(super) fn build_block_types() -> Registry<BlockType> {
     block_types.register(3, "grass", grass);
     block_types.register(4, "log", log);
     block_types.register(5, "leaves", leaves);
+    block_types.register(6, "lamp", lamp);
+    block_types.register(7, "red_glass", red_glass);
 
-    block_types
+    BLOCK_TYPES.init(block_types);
+    Ok(())
 }
 
 /// A block type and its state, packed into the value that a chunk stores.
 ///
 /// The lowest 12 bits hold the id of the block type and the upper 4 bits its
 /// state.
-pub type Meta = u16;
+pub type BlockMeta = u16;
+
 /// The state of a block: the combination of its properties.
-pub type State = u8;
+///
+/// A meta keeps the state in four bits, so only the values up to
+/// [`Self::MAX`] are valid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+#[repr(transparent)]
+pub struct BlockState(u8);
+
+impl BlockState {
+    /// The state a block type creates its blocks with.
+    pub const DEFAULT: Self = Self(0);
+
+    /// The highest state a block can have, because a meta keeps it in four
+    /// bits.
+    pub const MAX: Self = Self(0xF);
+
+    /// The state the four bits of a [`BlockMeta`] stand for.
+    #[inline]
+    const fn from_meta_bits(bits: u8) -> Self {
+        Self(bits & 0xF)
+    }
+
+    /// The state as the index of the per-state tables of a [`BlockType`].
+    #[inline]
+    pub const fn idx(self) -> usize {
+        self.0 as usize
+    }
+}
+
+impl Default for BlockState {
+    #[inline]
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl TryFrom<u8> for BlockState {
+    type Error = anyhow::Error;
+
+    fn try_from(value: u8) -> anyhow::Result<Self> {
+        if value > Self::MAX.0 {
+            anyhow::bail!("a block state of {value} does not fit in four bits");
+        }
+
+        Ok(Self(value))
+    }
+}
+
+impl From<BlockState> for u8 {
+    #[inline]
+    fn from(state: BlockState) -> Self {
+        state.0
+    }
+}
+
+/// The block value a structure uses to leave the block that is already there
+/// untouched while it is stamped.
+pub const KEEP: BlockMeta = BlockMeta::MAX;
+
+/// The blocks of one rectangular volume, stored as one meta per block.
+///
+/// This is the block storage shared by the chunks of the world and by the
+/// content of a structure. The values are packed metas rather than [`Block`]s,
+/// so a chunk can be saved and loaded without resolving the block types.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(into = "RawBlockChunk", try_from = "RawBlockChunk")]
+pub struct BlockChunk(pub Volume<BlockMeta>);
+
+/// The on-disk representation of a [`BlockChunk`].
+///
+/// The blocks are run length encoded, because a chunk is mostly air or one kind
+/// of rock. The size is part of the document because a structure chunk and the
+/// chunk of a region have different sizes.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct RawBlockChunk {
+    pub size: [u8; 3],
+    pub runs: Vec<(BlockMeta, u16)>,
+}
+
+/// The largest side of a chunk a file may describe, which bounds how much a
+/// malformed document can allocate while it is decoded.
+const MAX_CHUNK_SIDE: u8 = 64;
+
+impl From<BlockChunk> for RawBlockChunk {
+    fn from(chunk: BlockChunk) -> Self {
+        let mut runs = Vec::<(BlockMeta, u16)>::new();
+
+        for &block in chunk.0.vec.iter() {
+            match runs.last_mut() {
+                Some((last, count)) if *last == block && *count < u16::MAX => *count += 1,
+                _ => runs.push((block, 1)),
+            }
+        }
+
+        Self {
+            size: chunk.0.size.to_array(),
+            runs,
+        }
+    }
+}
+
+impl TryFrom<RawBlockChunk> for BlockChunk {
+    type Error = anyhow::Error;
+
+    fn try_from(raw: RawBlockChunk) -> anyhow::Result<Self> {
+        let size = U8Vec3::from(raw.size);
+        if size.min_element() == 0 || size.max_element() > MAX_CHUNK_SIDE {
+            anyhow::bail!("a chunk size of {size} is not supported");
+        }
+
+        let expected = size.as_usizevec3().element_product();
+        let mut vec = Vec::with_capacity(expected);
+
+        for (block, count) in raw.runs {
+            let len = vec.len() + count as usize;
+
+            if len > expected {
+                anyhow::bail!("a chunk holds more blocks than its size allows");
+            }
+
+            vec.resize(len, block);
+        }
+
+        if vec.len() != expected {
+            anyhow::bail!(
+                "a chunk holds {} blocks instead of the {expected} its size asks for",
+                vec.len()
+            );
+        }
+
+        Ok(Self(Volume { size, vec }))
+    }
+}
+
+impl Deref for BlockChunk {
+    type Target = Volume<BlockMeta>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for BlockChunk {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<Volume<BlockMeta>> for BlockChunk {
+    fn from(volume: Volume<BlockMeta>) -> Self {
+        Self(volume)
+    }
+}
+
+impl BlockChunk {
+    #[inline]
+    pub fn from_fn<F: Fn(U8Vec3) -> BlockMeta>(size: U8Vec3, pos_to_item: F) -> Self {
+        Self(Volume::from_fn(size, pos_to_item))
+    }
+
+    #[inline]
+    pub fn get_block(&self, pos: U8Vec3) -> Block {
+        Block::from_meta(*self.0.get(pos))
+    }
+
+    #[inline]
+    pub fn set_block(&mut self, pos: U8Vec3, block: Block) -> Block {
+        Block::from_meta(self.0.set(pos, block.to_meta()))
+    }
+
+    #[inline]
+    pub fn part(&self, min: U8Vec3, size: U8Vec3) -> Self {
+        Self(self.0.part(min, size))
+    }
+
+    #[inline]
+    pub fn bound(&self) -> AABB<U8Vec3> {
+        self.0.bound()
+    }
+}
 
 /// One block type: the models it is drawn with, the boxes it collides with and
 /// how much light it lets through.
@@ -118,26 +334,27 @@ pub struct BlockType {
     pub state_models: [u8; 16],
     /// Selects the collision boxes that belong to a state.
     pub state_bounds: [u8; 16],
-    /// How much the block dims the light on each axis, where zero is fully
-    /// transparent.
-    pub opacity: Vec3,
+    /// The light this block emits, if any.
+    pub emission: Option<Emission>,
     /// The state a block of this type is created with.
-    pub default_state: State,
+    pub default_state: BlockState,
 }
 
 /// One block in the world: its type, its state and a reference to its type.
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
+#[serde(into = "RawBlock")]
+#[serde(from = "RawBlock")]
 pub struct Block {
     pub type_id: Id,
     pub block_type: &'static BlockType,
-    pub state: State,
+    pub state: BlockState,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct RawBlock<'a> {
     block: &'a str,
     #[serde(default)]
-    state: State,
+    state: BlockState,
 }
 
 impl Eq for Block {}
@@ -148,26 +365,23 @@ impl PartialEq<Self> for Block {
     }
 }
 
-impl Serialize for Block {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        RawBlock {
-            block: BLOCK_TYPES.name_of(self.type_id),
-            state: self.state,
+impl From<RawBlock<'_>> for Block {
+    fn from(value: RawBlock) -> Self {
+        let type_id = BLOCK_TYPES.id_of(value.block);
+        Self {
+            type_id,
+            block_type: BLOCK_TYPES.get(type_id),
+            state: value.state,
         }
-            .serialize(serializer)
     }
 }
 
-impl<'de> Deserialize<'de> for Block {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = RawBlock::deserialize(deserializer)?;
-        let type_id = BLOCK_TYPES.id_of(raw.block);
-        
-        Ok(Self {
-            type_id,
-            block_type: BLOCK_TYPES.get(type_id),
-            state: raw.state,
-        })
+impl From<Block> for RawBlock<'_> {
+    fn from(value: Block) -> Self {
+        Self {
+            block: BLOCK_TYPES.name_of(value.type_id),
+            state: value.state,
+        }
     }
 }
 
@@ -192,7 +406,7 @@ impl Block {
     #[inline]
     pub fn default_of(type_id: Id) -> Self {
         let block_type = BLOCK_TYPES.get(type_id);
-        
+
         Self {
             type_id,
             block_type,
@@ -202,25 +416,30 @@ impl Block {
 
     /// The block a chunk entry stands for.
     #[inline]
-    pub fn from_meta(meta: Meta) -> Self {
+    pub fn from_meta(meta: BlockMeta) -> Self {
         let type_id = (meta & 0xFFF) as Id;
         Self {
             type_id,
             block_type: BLOCK_TYPES.get(type_id),
-            state: (meta >> 12) as State,
+            state: BlockState::from_meta_bits((meta >> 12) as u8),
         }
     }
 
     /// The chunk entry that stands for this block.
     #[inline]
-    pub fn to_meta(self) -> Meta {
-        self.type_id as Meta + ((self.state as Meta) << 12)
+    pub fn to_meta(self) -> BlockMeta {
+        debug_assert!(
+            self.type_id <= 0xFFF,
+            "block type {} does not fit in a meta",
+            self.type_id
+        );
+        self.type_id as BlockMeta + ((u8::from(self.state) as BlockMeta) << 12)
     }
 
     /// The block with the value of `P` set, leaving this one unchanged.
     #[inline]
     #[must_use]
-    pub fn with_state(mut self, state: State) -> Self {
+    pub fn with_state(mut self, state: BlockState) -> Self {
         self.state = state;
         self
     }
@@ -229,7 +448,7 @@ impl Block {
     #[inline]
     pub fn model(&self) -> &BlockModel {
         let block_type = self.block_type;
-        &block_type.models[block_type.state_models[self.state as usize] as usize]
+        &block_type.models[block_type.state_models[self.state.idx()] as usize]
     }
 
     /// The mesh of this block in its current state, in block coordinates.
@@ -242,9 +461,20 @@ impl Block {
     #[inline]
     pub fn bounds(&self, pos: BlockPos) -> Vec<AABB<Vec3>> {
         let block_type = self.block_type;
-        block_type.bounds[block_type.state_bounds[self.state as usize] as usize]
+        block_type.bounds[block_type.state_bounds[self.state.idx()] as usize]
             .iter()
             .map(|b| b.translate(pos.as_vec3()))
             .collect()
+    }
+
+    /// Whether the block collides with anything, which is what a walker has to
+    /// step over or walk around.
+    ///
+    /// Unlike [`Self::bounds`] this allocates nothing, because the walkers of
+    /// the world ask it for the blocks around them every tick.
+    #[inline]
+    pub fn is_solid(&self) -> bool {
+        let block_type = self.block_type;
+        !block_type.bounds[block_type.state_bounds[self.state.idx()] as usize].is_empty()
     }
 }

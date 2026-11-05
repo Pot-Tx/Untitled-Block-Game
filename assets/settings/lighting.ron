@@ -1,0 +1,30 @@
+(
+    // The distance of a directional light from the shadow box. It must be large
+    // enough that no world geometry stands between the light and the box.
+    directional_light_distance: 1024.0,
+    // How far the directional shadow box reaches along the light on each side
+    // of the center of its depth.
+    shadow_margin: 512.0,
+
+    // The number of block and entity sources uploaded to the GPU.
+    max_local_lights: 256,
+    // The nearest local lights that receive a shadow layer.
+    max_shadowed_local_lights: 4,
+    // The edge of each local shadow layer, in texels.
+    local_shadow_resolution: 512,
+
+    // Screen and distance subdivisions used to bin local lights.
+    cluster_grid: (16, 9, 24),
+    max_cluster_lights: 16,
+    cluster_near: 0.25,
+    cluster_far: 128.0,
+
+    // The cascades of the directional shadow map, nearest first. A cascade
+    // reaches `extent` blocks around the viewer and is drawn into a layer of
+    // `resolution` by `resolution` texels.
+    cascades: [
+        (extent: 32.0, resolution: 2048),
+        (extent: 64.0, resolution: 2048),
+        (extent: 128.0, resolution: 2048),
+    ],
+)

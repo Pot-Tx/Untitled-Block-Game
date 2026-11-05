@@ -1,19 +1,25 @@
 [(
     template: "cube_w",
     texture: "grass_top",
+    material: "default",
 ), (
     template: "cube_e",
     texture: "grass_top",
+    material: "default",
 ), (
     template: "cube_d",
     texture: "dirt",
+    material: "default",
 ), (
     template: "cube_u",
     texture: "grass_top",
+    material: "default",
 ), (
     template: "cube_n",
     texture: "grass_top",
+    material: "default",
 ), (
     template: "cube_s",
     texture: "grass_top",
+    material: "default",
 )]

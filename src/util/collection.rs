@@ -1,12 +1,17 @@
+use crate::game::ASSET_OPTIONS;
 use crate::util::Id;
+use crate::util::bounding::AABB;
+use crate::util::files_in;
+use anyhow::{Context, anyhow};
 use bimap::BiMap;
 use glam::{U8Vec3, USizeVec3};
 use log::error;
 use serde::de::DeserializeOwned;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::{fs, mem};
-use anyhow::anyhow;
+use std::mem;
+use std::path::Path;
 
 /// A set of [`Id`]s kept as a dense list plus a sparse lookup table.
 ///
@@ -58,13 +63,14 @@ impl SparseSet {
         self.len() == 0
     }
 
+    /// The position of `id` in the dense list, or `None` when it is not in the
+    /// set.
     #[inline]
-    pub fn find(&self, id: Id) -> Option<Id> {
+    pub fn find(&self, id: Id) -> Option<usize> {
         if let Some(&idx) = self.sparse.get(id as usize)
-            && let Some(&id1) = self.dense.get(idx as usize)
-            && id1 == id
+            && self.dense.get(idx as usize) == Some(&id)
         {
-            Some(idx)
+            Some(idx as usize)
         } else {
             None
         }
@@ -84,23 +90,23 @@ impl SparseSet {
 
     /// Appends `id` at `idx`, which must be the current length of the set.
     #[inline]
-    pub fn put(&mut self, id: Id, idx: Id) {
+    pub fn put(&mut self, id: Id, idx: usize) {
         if id as usize >= self.sparse.len() {
             self.sparse.resize(id as usize + 1, 0);
         }
 
         self.dense.push(id);
-        self.sparse[id as usize] = idx;
+        self.sparse[id as usize] = idx as Id;
     }
 
     /// Removes the entry at `idx` by moving the last entry into the freed slot.
     #[inline]
-    pub fn kick(&mut self, _id: Id, idx: Id) {
+    pub fn kick(&mut self, idx: usize) {
         let last_idx = self.dense.len() - 1;
         let last_id = self.dense[last_idx];
 
-        self.sparse[last_id as usize] = idx;
-        self.dense.swap_remove(idx as usize);
+        self.sparse[last_id as usize] = idx as Id;
+        self.dense.swap_remove(idx);
     }
 
     #[inline]
@@ -109,7 +115,7 @@ impl SparseSet {
             false
         } else {
             let idx = self.dense.len();
-            self.put(id, idx as Id);
+            self.put(id, idx);
             true
         }
     }
@@ -118,7 +124,7 @@ impl SparseSet {
     pub fn remove(&mut self, id: Id) -> bool {
         match self.find(id) {
             Some(idx) => {
-                self.kick(id, idx);
+                self.kick(idx);
                 true
             }
             None => false,
@@ -159,7 +165,7 @@ impl<T> DenseMap<T> {
     #[inline]
     pub fn get(&self, id: Id) -> Option<&T> {
         match self.ids.find(id) {
-            Some(idx) => Some(&self.items[idx as usize]),
+            Some(idx) => Some(&self.items[idx]),
             None => None,
         }
     }
@@ -167,7 +173,7 @@ impl<T> DenseMap<T> {
     #[inline]
     pub fn get_mut(&mut self, id: Id) -> Option<&mut T> {
         match self.ids.find(id) {
-            Some(idx) => Some(&mut self.items[idx as usize]),
+            Some(idx) => Some(&mut self.items[idx]),
             None => None,
         }
     }
@@ -195,10 +201,10 @@ impl<T> DenseMap<T> {
     #[inline]
     pub fn insert(&mut self, id: Id, item: T) -> Option<T> {
         match self.ids.find(id) {
-            Some(idx) => Some(mem::replace(&mut self.items[idx as usize], item)),
+            Some(idx) => Some(mem::replace(&mut self.items[idx], item)),
             None => {
                 let idx = self.items.len();
-                self.ids.put(id, idx as Id);
+                self.ids.put(id, idx);
                 self.items.push(item);
                 None
             }
@@ -209,8 +215,8 @@ impl<T> DenseMap<T> {
     pub fn remove(&mut self, id: Id) -> Option<T> {
         match self.ids.find(id) {
             Some(idx) => {
-                self.ids.kick(id, idx);
-                Some(self.items.swap_remove(idx as usize))
+                self.ids.kick(idx);
+                Some(self.items.swap_remove(idx))
             }
             None => None,
         }
@@ -423,15 +429,19 @@ impl<T> Volume<T> {
         })
     }
 
+    #[inline]
+    pub fn bound(&self) -> AABB<U8Vec3> {
+        AABB {
+            min: U8Vec3::ZERO,
+            max: self.size,
+        }
+    }
+
     pub fn iter(&self, min: U8Vec3, max: U8Vec3) -> impl Iterator<Item = &'_ T> + '_ {
         self.rows(min, max).flatten()
     }
 
-    pub fn iter_mut<'a>(
-        &mut self,
-        min: U8Vec3,
-        max: U8Vec3,
-    ) -> impl Iterator<Item = &'_ mut T> + '_ {
+    pub fn iter_mut(&mut self, min: U8Vec3, max: U8Vec3) -> impl Iterator<Item = &'_ mut T> + '_ {
         self.rows_mut(min, max).flatten()
     }
 }
@@ -443,16 +453,15 @@ pub struct Registry<T> {
 
 #[macro_export]
 macro_rules! id_of {
-    ($reg:expr, $name:expr) => {{
+    ($reg:expr, $name:literal) => {{
         static CACHE: std::sync::OnceLock<$crate::util::Id> = std::sync::OnceLock::new();
         *CACHE.get_or_init(|| $reg.id_of($name))
     }};
 }
 
-
 #[macro_export]
 macro_rules! by_name {
-    ($reg:expr, $name:expr) => {{
+    ($reg:expr, $name:literal) => {{
         static CACHE: std::sync::OnceLock<$crate::util::Id> = std::sync::OnceLock::new();
         let id = *CACHE.get_or_init(|| $reg.id_of($name));
         $reg.get(id)
@@ -469,26 +478,37 @@ impl<T> Default for Registry<T> {
 }
 
 impl<T: DeserializeOwned> Registry<T> {
-    /// Loads every file of `path`, numbering the entries in the order the
-    /// directory lists them.
-    pub fn load_rons_from(path: &str) -> anyhow::Result<Self> {
+    /// Loads every file of `path`, numbering the entries by their name, so that
+    /// the id of an entry does not depend on the order the directory lists its
+    /// files in. A file that does not read is reported with its own name, because
+    /// what an entry holds is checked while it is read.
+    pub fn load_rons_from<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         let mut new = Self::new();
 
-        let mut id = 0;
-        for entry in fs::read_dir(path)? {
-            let path = entry?.path();
-            if path.is_file() {
-                let name = path
-                    .file_stem()
-                    .ok_or(anyhow!("failed to get file name"))?
-                    .to_string_lossy()
-                    .into_owned();
-                let file = File::open(path)?;
-                let item = ron::de::from_reader(BufReader::new(file))?;
+        for (id, path) in files_in(path.as_ref())?.into_iter().enumerate() {
+            let name = path
+                .file_stem()
+                .ok_or(anyhow!("failed to get file name"))?
+                .to_string_lossy()
+                .into_owned();
+            let file = File::open(&path)?;
+            let item = ASSET_OPTIONS
+                .from_reader(BufReader::new(file))
+                .with_context(|| format!("failed to read {}", path.display()))?;
 
-                new.register(id, name, item);
-                id += 1;
-            }
+            new.register(id as Id, name, item);
+        }
+
+        Ok(new)
+    }
+
+    pub fn load_ron_from<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let mut new = Self::new();
+
+        let file = File::open(path)?;
+        let map: HashMap<String, T> = ASSET_OPTIONS.from_reader(file)?;
+        for (i, (name, item)) in map.into_iter().enumerate() {
+            new.register(i as Id, name, item);
         }
 
         Ok(new)
@@ -539,14 +559,14 @@ impl<T> Registry<T> {
             .get(id as usize)
             .unwrap_or_else(|| panic!("entry with id {} not found", id))
     }
-    
+
     #[inline]
     pub fn by_name(&self, name: &str) -> &T {
         self.entries
             .get(self.id_of(name) as usize)
             .unwrap_or_else(|| panic!("entry with name {} not found", name))
     }
-    
+
     pub fn map<U, F: FnMut(&T) -> U>(&self, f: F) -> Registry<U> {
         Registry {
             entries: self.entries.iter().map(f).collect(),

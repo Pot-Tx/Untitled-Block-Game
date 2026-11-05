@@ -1,21 +1,23 @@
+use crate::actor::{Inventory, PlayerControlled};
 use crate::ecs::*;
-use crate::game::{InputState, Paused, INPUT_MAP};
+use crate::game::{INPUT_MAP, InputState, Paused};
 use crate::render::ViewPortAlignment;
 use crate::resources;
 use crate::ui::*;
-use crate::util::collection::Registry;
 use crate::util::Id;
 use crate::util::OnceInit;
+use crate::util::collection::Registry;
 use crate::{by_name, id_of};
 use anyhow::anyhow;
 use ron::value::RawValue;
 use serde::{Deserialize, Serialize};
 use std::any::TypeId;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use winit::event::MouseButton;
 
 /// Every file of `assets/screens` names a screen, how it behaves and which
-/// elements it contains; [`build_screens`] turns them into the registry the
+/// elements it contains; [`init_screen_types`] turns them into the registry the
 /// game looks screens up in.
 pub(crate) static SCREEN_TYPES: OnceInit<Registry<ScreenType>> = OnceInit::new();
 
@@ -49,16 +51,15 @@ pub(crate) struct RawScreen {
 ///
 /// Has to be called after the systems of the user interface have been
 /// registered, because an element names the systems that handle its triggers.
-pub(crate) fn build_screens(
+pub(crate) fn init_screen_types(
     components: &ComponentManager,
-    systems: &SystemManager,
-) -> Registry<ScreenType> {
-    Registry::load_rons_from("assets/screens")
-        .expect("failed to load screens")
-        .map(|raw| {
-            ScreenType::from_raw(components, systems, raw)
-                .expect("failed to create a screen from data")
-        })
+    systems: &SystemManager<2>,
+) -> anyhow::Result<()> {
+    let reg = Registry::load_rons_from("assets/screens")?;
+    SCREEN_TYPES.init(reg.map(|raw| {
+        ScreenType::from_raw(components, systems, raw).expect("failed to create a screen from data")
+    }));
+    Ok(())
 }
 
 /// The definition of a screen: where it is drawn, how it behaves and which
@@ -79,6 +80,16 @@ pub(crate) struct ScreenType {
 #[derive(Default)]
 pub struct Screen {
     pub entities: Vec<Id>,
+    pub ready: bool,
+}
+
+impl Screen {
+    pub fn new(entities: Vec<Id>) -> Self {
+        Self {
+            entities,
+            ready: false,
+        }
+    }
 }
 
 impl ScreenType {
@@ -86,7 +97,7 @@ impl ScreenType {
     /// it is spawned with.
     fn from_raw(
         components: &ComponentManager,
-        systems: &SystemManager,
+        systems: &SystemManager<2>,
         raw: &RawScreen,
     ) -> anyhow::Result<Self> {
         let mut entities = Vec::new();
@@ -119,7 +130,7 @@ impl ScreenType {
 
 /// Turns the system names of a data file into the type ids a [`Triggers`]
 /// component holds.
-fn resolve_triggers(systems: &SystemManager, names: &[String]) -> anyhow::Result<Vec<TypeId>> {
+fn resolve_triggers(systems: &SystemManager<2>, names: &[String]) -> anyhow::Result<Vec<TypeId>> {
     names
         .iter()
         .map(|name| {
@@ -128,12 +139,6 @@ fn resolve_triggers(systems: &SystemManager, names: &[String]) -> anyhow::Result
                 .ok_or_else(|| anyhow!("system {} is not registered", name))
         })
         .collect()
-}
-
-impl Screen {
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 resources! {
@@ -163,6 +168,10 @@ impl ActiveScreens {
         self.screens.get(&screen)
     }
 
+    pub fn get_mut(&mut self, screen: Id) -> Option<&mut Screen> {
+        self.screens.get_mut(&screen)
+    }
+
     /// Returns whether any open screen pauses the game.
     pub fn pauses(&self) -> bool {
         self.order
@@ -177,37 +186,27 @@ impl ActiveScreens {
             .any(|screen| SCREEN_TYPES.get(*screen).dismissible)
     }
 
-    /// Opens `screen` and returns the commands that spawn its elements.
-    pub fn open(&mut self, type_id: Id) -> Vec<Command> {
+    /// Opens `screen` and spawns its elements with `spawn`, recording the ids
+    /// in drawing order.
+    pub fn open(&mut self, type_id: Id, mut spawn: impl FnMut(EntityDescriptor) -> Id) {
         if self.contains(type_id) {
-            return Vec::new();
+            return;
         }
 
-        self.screens.insert(
-            type_id,
-            Screen {
-                entities: Vec::new(),
-            },
-        );
-        self.order.push(type_id);
-
-        SCREEN_TYPES
+        let entities = SCREEN_TYPES
             .get(type_id)
             .entities
             .iter()
-            .enumerate()
-            .map(|(priority, entity)| {
-                Command::Spawn(entity.clone().with(ScreenTag {
-                    screen: type_id,
-                    priority: priority as u32,
-                }))
-            })
-            .collect()
+            .map(|entity| spawn(entity.clone()))
+            .collect();
+
+        self.screens.insert(type_id, Screen::new(entities));
+        self.order.push(type_id);
     }
 
-    /// Closes the topmost screen when it is dismissible, returning the commands
-    /// that remove its elements.
-    pub fn close_top(&mut self) -> Vec<Command> {
+    /// Closes the topmost screen when it is dismissible, returning the elements
+    /// it removes.
+    pub fn close_top(&mut self) -> Vec<Id> {
         let Some(screen) = self.top() else {
             return Vec::new();
         };
@@ -222,61 +221,16 @@ impl ActiveScreens {
             .remove(&screen)
             .map(|screen| screen.entities)
             .unwrap_or_default()
-            .into_iter()
-            .map(Command::Despawn)
-            .collect()
-    }
-}
-
-/// Collects the elements of the screens that were just opened.
-pub(super) struct ScreenCollector;
-
-impl System for ScreenCollector {
-    type CompQuery = (CompRead<ScreenTag>,);
-    type ResQuery = (ResWrite<ActiveScreens>,);
-
-    fn update(&mut self, comp: Self::CompQuery, res: Self::ResQuery) -> Vec<Command> {
-        let (screens,) = res.get();
-
-        let mut collected: HashMap<Id, Vec<(u32, Id)>> = HashMap::new();
-        let mut commands = Vec::new();
-
-        // The elements of a screen arrive as tagged entities, which are sorted
-        // by their priority so that the screen knows what to draw on top.
-        for (entity, tag) in comp.iter() {
-            match screens.contains(tag.screen) {
-                true => collected
-                    .entry(tag.screen)
-                    .or_default()
-                    .push((tag.priority, entity)),
-
-                // The screen was closed before its elements were collected.
-                false => commands.push(Command::Despawn(entity)),
-            }
-
-            // The tag is only needed while the screen is being built.
-            commands.push(Command::Remove(entity, TypeId::of::<ScreenTag>()));
-        }
-
-        for (screen, mut entities) in collected {
-            entities.sort();
-
-            if let Some(instance) = screens.screens.get_mut(&screen) {
-                instance
-                    .entities
-                    .extend(entities.into_iter().map(|(_, entity)| entity));
-            }
-        }
-
-        commands
     }
 }
 
 /// Opens the pause screen and closes it again when escape is pressed.
 pub(super) struct ScreenController;
 
-impl System for ScreenController {
-    type CompQuery = CompRead<Triggers>;
+pub(super) struct HotbarController;
+
+impl System<2> for ScreenController {
+    type CompQueries = ((), (CompRead<Triggers>,));
     type ResQuery = (
         ResRead<ActiveElement>,
         ResRead<InputState>,
@@ -284,23 +238,152 @@ impl System for ScreenController {
         ResWrite<Paused>,
     );
 
-    fn update(&mut self, comp: Self::CompQuery, res: Self::ResQuery) -> Vec<Command> {
-        let (active, input, screens, paused) = res.get();
-        let triggered = active.0.is_some_and(|id| {
-            comp.get(id).is_some_and(|tags| tags.is_for::<Self>())
-        }) && input.is_button_just_released(MouseButton::Left);
+    fn update(
+        &mut self,
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        com: [Commander<'_>; 2],
+    ) {
+        if (res.0.triggers_for::<Self>(&comp.1.0)
+            && res.1.is_button_just_released(MouseButton::Left))
+            || res.1.is_input_present(by_name!(INPUT_MAP, "return"))
+        {
+            let mut ui = com[1].lock();
 
-        if triggered || input.is_input_present(by_name!(INPUT_MAP, "return")) {
-            let commands = match screens.top() {
-                Some(screen) if SCREEN_TYPES.get(screen).dismissible => screens.close_top(),
+            match res.2.top() {
+                Some(screen) if SCREEN_TYPES.get(screen).dismissible => {
+                    for entity in res.2.close_top() {
+                        ui.despawn(entity);
+                    }
+                }
 
-                _ => screens.open(id_of!(SCREEN_TYPES, "pause")),
-            };
+                _ => {
+                    res.2
+                        .open(id_of!(SCREEN_TYPES, "pause"), |element| ui.spawn(element));
+                }
+            }
 
-            paused.0 = screens.pauses();
-            commands
-        } else {
-            Vec::new()
+            res.3.0 = res.2.pauses();
+        }
+    }
+}
+
+impl System<2> for HotbarController {
+    type CompQueries = (
+        (CompRead<PlayerControlled>, CompWrite<Inventory>),
+        (CompWrite<UiSprite>, CompWrite<UiBlock>),
+    );
+    type ResQuery = (
+        ResRead<Paused>,
+        ResRead<InputState>,
+        ResWrite<ActiveScreens>,
+    );
+
+    fn update(
+        &mut self,
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        com: [Commander<'_>; 2],
+    ) {
+        for (_, _, inv) in comp.0.iter() {
+            if !res.0.0 {
+                let delta = -(res.1.mouse_scroll.y.round() as isize);
+                inv.scroll(delta);
+            }
+
+            if let Some(hotbar) = res.2.get_mut(id_of!(SCREEN_TYPES, "hotbar")) {
+                let (prev, changed) = if hotbar.ready {
+                    (inv.prev(), inv.changed())
+                } else {
+                    hotbar.ready = true;
+                    (usize::MAX, (0..inv.cap()).collect())
+                };
+
+                let cur = inv.cur();
+                if prev != cur {
+                    if let Some(sprite) = hotbar
+                        .entities
+                        .get(prev)
+                        .and_then(|&entity| comp.1.0.get(entity))
+                    {
+                        sprite.color = Vec4::new(0.125, 0.125, 0.125, 0.875);
+                    }
+
+                    if let Some(sprite) = hotbar
+                        .entities
+                        .get(cur)
+                        .and_then(|&entity| comp.1.0.get(entity))
+                    {
+                        sprite.color = Vec4::new(0.375, 0.625, 0.375, 1.0);
+                    }
+                }
+
+                let mut guard = com[1].lock();
+                for index in changed {
+                    if let Some(&entity) = hotbar.entities.get(index) {
+                        match (comp.1.1.get(entity), inv.get(index)) {
+                            (None, Some(block)) => {
+                                guard.insert(entity, UiBlock(block));
+                            }
+
+                            (Some(_), None) => {
+                                guard.remove::<UiBlock>(entity);
+                            }
+
+                            (Some(ui_block), Some(block)) => {
+                                ui_block.0 = block;
+                            }
+
+                            _ => (),
+                        }
+                    }
+                }
+            }
+
+            inv.flush();
+        }
+    }
+}
+
+pub(super) struct FrameRater {
+    duration: Duration,
+    timer: Instant,
+    recent: u32,
+}
+
+impl System<2> for FrameRater {
+    type CompQueries = ((), (CompWrite<UiText>,));
+    type ResQuery = (ResRead<ActiveScreens>,);
+
+    fn update(
+        &mut self,
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _: [Commander<'_>; 2],
+    ) {
+        if self.timer.elapsed() > self.duration {
+            self.timer = Instant::now();
+            let fps = (self.recent as f32 / self.duration.as_secs_f32()).round() as u32;
+
+            if let Some(hud) = res.0.get(id_of!(SCREEN_TYPES, "hud"))
+                && let Some(text) = comp.1.0.get(hud.entities[2])
+            {
+                text.text = format!("{:.2} fps", fps);
+            }
+
+            self.recent = 0;
+        }
+
+        self.recent += 1;
+    }
+}
+
+impl FrameRater {
+    pub fn new(duration: Duration) -> Self {
+        Self {
+            duration,
+            timer: Instant::now(),
+            recent: 0,
         }
     }
 }

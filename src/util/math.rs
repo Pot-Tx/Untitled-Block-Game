@@ -13,6 +13,7 @@ where
     T: Eq + PartialEq,
     [T; N]: Index<usize, Output = T>,
 {
+    #[allow(clippy::needless_range_loop)]
     fn all_eq(&self) -> bool {
         let value = &self[0];
         for i in 1..N {
@@ -25,6 +26,7 @@ where
 }
 
 impl<T: Eq + PartialEq> AllEq for Vec<T> {
+    #[allow(clippy::needless_range_loop)]
     fn all_eq(&self) -> bool {
         let len = self.len();
         if len > 0 {

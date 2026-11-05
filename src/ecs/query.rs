@@ -37,14 +37,18 @@ impl Display for QueryError {
             Self::MissingComponent(name) => write!(f, "component {} is not registered", name),
 
             Self::MissingComponentId(id) => write!(f, "component {:?} is not registered", id),
-            
-            Self::MissingComponentName(name) => write!(f, "component name \"{}\" is not registered", name),
+
+            Self::MissingComponentName(name) => {
+                write!(f, "component name \"{}\" is not registered", name)
+            }
 
             Self::MissingResource(name) => write!(f, "resource {} is not registered", name),
-            
+
             Self::MissingResourceId(id) => write!(f, "resource {:?} is not registered", id),
-            
-            Self::MissingResourceName(name) => write!(f, "resource name \"{}\" is not registered", name),
+
+            Self::MissingResourceName(name) => {
+                write!(f, "resource name \"{}\" is not registered", name)
+            }
         }
     }
 }
@@ -55,31 +59,37 @@ impl std::error::Error for QueryError {}
 /// that iterates entities ([`CompRead`] or [`CompWrite`]); the fetches after it
 /// filter or widen the entity that is currently being visited.
 pub trait CompQuery {
-    type Item<'a> where Self: 'a;
+    type Item<'a>
+    where
+        Self: 'a;
 
     fn access() -> Access;
-    
+
     fn new(components: &ComponentManager) -> Result<Self, QueryError>
     where
-        Self: Sized; 
-    
+        Self: Sized;
+
     fn iter(&self) -> impl Iterator<Item = Self::Item<'_>>;
 }
 
 pub trait ResQuery {
-    type Item<'a> where Self: 'a;
+    type Item<'a>
+    where
+        Self: 'a;
 
     fn access() -> Access;
-    
+
     fn new(resources: &ResourceManager) -> Result<Self, QueryError>
     where
         Self: Sized;
-    
+
     fn get(&self) -> Self::Item<'_>;
 }
 
 pub trait CompFetch {
-    type Item<'a> where Self: 'a;
+    type Item<'a>
+    where
+        Self: 'a;
 
     fn add_to(access: &mut Access);
 
@@ -93,10 +103,12 @@ pub trait CompFetch {
 }
 
 pub trait ResFetch {
-    type Item<'a> where Self: 'a;
+    type Item<'a>
+    where
+        Self: 'a;
 
     fn add_to(access: &mut Access);
-    
+
     fn new(resources: &ResourceManager) -> Result<Self, QueryError>
     where
         Self: Sized;
@@ -117,18 +129,16 @@ impl Access {
         Self::default()
     }
 
-    /// Adds `other` to this access, returning whether the two overlap.
-    pub fn add(&mut self, other: &Access) -> bool {
-        if other.read.intersection(&self.write).next().is_none()
+    pub fn compats_with(&self, other: &Access) -> bool {
+        other.read.intersection(&self.write).next().is_none()
             && other.write.intersection(&self.read).next().is_none()
             && other.write.intersection(&self.write).next().is_none()
-        {
-            self.read.extend(other.read.iter());
-            self.write.extend(other.write.iter());
-            true
-        } else {
-            false
-        }
+    }
+
+    /// Adds `other` to this access, returning whether the two overlap.
+    pub fn add(&mut self, other: &Access) {
+        self.read.extend(other.read.iter());
+        self.write.extend(other.write.iter());
     }
 }
 
@@ -207,7 +217,7 @@ impl<C: Component> CompFetch for CompWrite<C> {
     fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { (&*self.comp).get_mut::<C>(entity) }
     }
-    
+
     fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         unsafe { (&*self.comp).iter_mut() }
     }
@@ -230,7 +240,7 @@ impl<C: Component> CompFetch for OptionalRead<C> {
     fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { Some((&*self.comp).get::<C>(entity)) }
     }
-    
+
     fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         iter::empty()
     }
@@ -253,7 +263,7 @@ impl<C: Component> CompFetch for OptionalWrite<C> {
     fn get(&self, entity: Id) -> Option<Self::Item<'_>> {
         unsafe { Some((&*self.comp).get_mut::<C>(entity)) }
     }
-    
+
     fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         iter::empty()
     }
@@ -280,7 +290,7 @@ impl<C: Component> CompFetch for Without<C> {
             }
         }
     }
-    
+
     fn iter(&self) -> impl Iterator<Item = (Id, Self::Item<'_>)> {
         iter::empty()
     }
@@ -292,7 +302,7 @@ impl<R: Resource> ResFetch for ResRead<R> {
     fn add_to(access: &mut Access) {
         access.read.insert(TypeId::of::<R>());
     }
-    
+
     fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
         Ok(Self {
             res: resources.get::<R>()?,
@@ -311,14 +321,14 @@ impl<R: Resource> ResFetch for ResWrite<R> {
     fn add_to(access: &mut Access) {
         access.write.insert(TypeId::of::<R>());
     }
-    
+
     fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
         Ok(Self {
             res: resources.get::<R>()?,
             _marker: PhantomData,
         })
     }
-    
+
     fn get(&self) -> Self::Item<'_> {
         unsafe { (&*self.res).get_mut() }
     }
@@ -331,11 +341,11 @@ impl CompQuery for () {
     fn access() -> Access {
         Access::new()
     }
-    
+
     fn new(_: &ComponentManager) -> Result<Self, QueryError> {
         Ok(())
     }
-    
+
     fn iter(&self) -> impl Iterator<Item = Self::Item<'_>> {
         iter::once(())
     }
@@ -347,51 +357,12 @@ impl ResQuery for () {
     fn access() -> Access {
         Access::new()
     }
-    
+
     fn new(_: &ResourceManager) -> Result<Self, QueryError> {
         Ok(())
     }
-    
-    fn get(&self) -> Self::Item<'_> {
-        ()
-    }
-}
 
-impl<C: CompFetch> CompQuery for C {
-    type Item<'a> = (Id, C::Item<'a>) where C: 'a;
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        C::add_to(&mut access);
-        access
-    }
-    
-    fn new(components: &ComponentManager) -> Result<Self, QueryError> {
-        C::new(components)
-    }
-    
-    fn iter(&self) -> impl Iterator<Item = Self::Item<'_>> {
-        self.iter()
-    }
-
-}
-
-impl<R: ResFetch> ResQuery for R {
-    type Item<'a> = R::Item<'a> where R: 'a;
-
-    fn access() -> Access {
-        let mut access = Access::new();
-        R::add_to(&mut access);
-        access
-    }
-    
-    fn new(resources: &ResourceManager) -> Result<Self, QueryError> {
-        R::new(resources)
-    }
-    
-    fn get(&self) -> Self::Item<'_> {
-        self.get()
-    }
+    fn get(&self) -> Self::Item<'_> {}
 }
 
 /// The component arm lets the first fetch drive the iteration and looks the
@@ -467,3 +438,5 @@ impl_query!(res R(rf), S(sf), T(tf));
 impl_query!(res R(rf), S(sf), T(tf), U(uf));
 impl_query!(res R(rf), S(sf), T(tf), U(uf), V(vf));
 impl_query!(res R(rf), S(sf), T(tf), U(uf), V(vf), W(wf));
+impl_query!(res R(rf), S(sf), T(tf), U(uf), V(vf), W(wf), X(xf));
+impl_query!(res R(rf), S(sf), T(tf), U(uf), V(vf), W(wf), X(xf), Y(yf));

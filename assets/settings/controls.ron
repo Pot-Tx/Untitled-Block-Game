@@ -1,0 +1,11 @@
+{
+    "return":   (button: Key(Escape),   action: JustPressed),
+    "forward":  (button: Key(KeyW),     action: Pressed),
+    "left":     (button: Key(KeyA),     action: Pressed),
+    "backward": (button: Key(KeyS),     action: Pressed),
+    "right":    (button: Key(KeyD),     action: Pressed),
+    "ascend":   (button: Key(Space),    action: Pressed),
+    "descend":  (button: Key(ShiftLeft),action: Pressed),
+    "attack":   (button: Mouse(Left),   action: JustPressed),
+    "interact": (button: Mouse(Right),  action: JustPressed),
+}

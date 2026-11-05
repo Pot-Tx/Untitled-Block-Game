@@ -22,12 +22,19 @@ struct FragmentOut {
 var textures: texture_2d_array<f32>;
 @group(0) @binding(1)
 var texsampler: sampler;
+
+// The transform of the camera and the position it stands at.
+struct Camera {
+    matrix: mat4x4<f32>,
+    position: vec4f,
+}
+
 @group(1) @binding(0)
-var<uniform> camera: mat4x4<f32>;
+var<uniform> camera: Camera;
 
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
-    let pos = camera * vec4f(in.pos + vec3f(in.inst), 1.0);
+    let pos = camera.matrix * vec4f(in.pos + vec3f(in.inst), 1.0);
 
     let p = max(in.norm, vec3f(0.0));
     let n = max(-in.norm, vec3f(0.0));

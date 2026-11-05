@@ -1,19 +1,31 @@
 [(
     template: "cube_w",
     texture: "leaves",
+    material: "leaves",
+    no_cull: true,
 ), (
     template: "cube_e",
     texture: "leaves",
+    material: "leaves",
+    no_cull: true,
 ), (
     template: "cube_d",
     texture: "leaves",
+    material: "leaves",
+    no_cull: true,
 ), (
     template: "cube_u",
     texture: "leaves",
+    material: "leaves",
+    no_cull: true,
 ), (
     template: "cube_n",
     texture: "leaves",
+    material: "leaves",
+    no_cull: true,
 ), (
     template: "cube_s",
     texture: "leaves",
+    material: "leaves",
+    no_cull: true,
 )]

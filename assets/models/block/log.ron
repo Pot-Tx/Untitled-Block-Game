@@ -1,19 +1,25 @@
 [(
     template: "cube_w",
     texture: "log_side",
+    material: "default",
 ), (
     template: "cube_e",
     texture: "log_side",
+    material: "default",
 ), (
     template: "cube_d",
     texture: "log_top",
+    material: "default",
 ), (
     template: "cube_u",
     texture: "log_top",
+    material: "default",
 ), (
     template: "cube_n",
     texture: "log_side",
+    material: "default",
 ), (
     template: "cube_s",
     texture: "log_side",
+    material: "default",
 )]

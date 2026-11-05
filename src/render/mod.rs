@@ -11,14 +11,15 @@ mod canvas;
 mod mesh;
 mod texture;
 mod vertex;
+mod visibility;
 
-use crate::resources;
 use crate::ecs::{ResourceManager, SystemManager};
+use crate::resources;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
 use glam::*;
 use std::marker::PhantomData;
-use wgpu::util::{BufferInitDescriptor, DeviceExt};
+use wgpu::util::DeviceExt;
 use wgpu::*;
 
 use crate::util::OnceInit;
@@ -29,6 +30,8 @@ pub use canvas::*;
 pub use mesh::*;
 pub use texture::*;
 pub use vertex::*;
+pub(crate) use visibility::Visibility;
+use visibility::VisibilityPreparer;
 
 pub const QUAD_INDICES: [u16; 6] = [0, 1, 2, 2, 3, 0];
 /// A vertex buffer without vertices, used by batches that draw from indices and
@@ -58,14 +61,26 @@ pub(crate) fn init(resources: &mut ResourceManager, canvas: &Canvas) {
     QUAD_INDEX_BUFFER_VEC.init(BufferVec::quad_index(canvas));
 
     resources.register("camera", Camera::new(canvas));
+    resources.register("visibility", Visibility::new());
 }
 
 /// Registers the resources and the systems of the renderer.
-pub(crate) fn register(frame: &mut SystemManager, resources: &mut ResourceManager) {
-    resources.register::<Option<Frame>>("frame", None);
+pub(crate) fn register(frame: &mut SystemManager<2>, resources: &mut ResourceManager) {
+    resources.register("frame", FrameSlot::default());
     resources.register("partial_tick", PartialTick(0.0));
 
     frame.register(2, "camera_transformer", CameraTransformer);
+    frame.register(3, "visibility_preparer", VisibilityPreparer);
+}
+
+/// Registers the systems of the renderer that need a canvas to create their
+/// resources.
+///
+/// The resolver runs after every pass of the world and before the interface:
+/// it is the pass that maps the scene onto the surface the interface draws
+/// into.
+pub(crate) fn register_canvas(canvas: &Canvas) {
+    init_resolve(canvas);
 }
 
 /// A drawable geometry, described as vertex, index and instance buffers.
@@ -93,7 +108,7 @@ pub struct BufferVec<T: Pod + Zeroable> {
     pub buffer: Buffer,
     pub length: u32,
     capacity: u32,
-    label: String,
+    name: String,
     usage: BufferUsages,
     _marker: PhantomData<T>,
 }
@@ -149,7 +164,7 @@ impl<T: Pod + Zeroable> FromConfig<BufferConfig<'_, T>> for BufferVec<T> {
             buffer: Buffer::new(base, config),
             length,
             capacity,
-            label: format!("{}_buffer", config.name),
+            name: config.name.to_owned(),
             usage: config.usage,
             _marker: PhantomData,
         }
@@ -216,11 +231,14 @@ impl<T: Pod + Zeroable> BufferVec<T> {
         let contents = bytemuck::cast_slice(content);
 
         if self.length > self.capacity {
-            self.buffer = canvas.device.create_buffer_init(&BufferInitDescriptor {
-                label: Label::from(self.label.as_str()),
-                contents,
-                usage: self.usage,
-            });
+            self.buffer = Buffer::new(
+                canvas,
+                &BufferConfig {
+                    name: &self.name,
+                    init: BufferInit::Content(content),
+                    usage: self.usage,
+                },
+            );
             self.capacity = self.length;
         } else {
             canvas.queue.write_buffer(&self.buffer, 0, contents);

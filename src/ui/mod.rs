@@ -4,25 +4,25 @@
 //! UI entities live in their own [`EntityManager`](crate::ecs::EntityManager),
 //! separately from the entities of the world.
 
-mod trigger;
 mod render;
 mod screen;
+mod trigger;
 
-pub use trigger::*;
-use render::UiRenderer;
+use render::{UiRenderer, init_ui_textures};
 pub use screen::*;
+pub use trigger::*;
 
 use crate::components;
-use crate::ecs::{ComponentManager, EntityManager, ResourceManager, SystemManager};
-use crate::id_of;
+use crate::ecs::{EntityManager, ResourceManager, SystemManager};
 use crate::render::{Canvas, Inst, Vertex, Viewports};
 use crate::util::bounding::AABB;
-use crate::util::Id;
 use crate::world::Block;
 use bytemuck::{Pod, Zeroable};
-use glam::Vec2;
-use serde::{Serialize, Deserialize};
+use glam::{Vec2, Vec4};
+use log::error;
+use serde::{Deserialize, Serialize};
 use std::mem::offset_of;
+use std::time::Duration;
 use wgpu::*;
 
 /// Width and height of the UI space that the viewports are laid out in, in UI
@@ -33,26 +33,22 @@ const UI_HEIGHT: f32 = 256.0;
 components! {
     /// The area an element occupies, in the UI space of its viewport.
     #[derive(Clone, Copy, Serialize, Deserialize)]
-    pub struct UiRect(AABB<Vec2>): Hot, data;
+    pub struct UiRect(AABB<Vec2>): Hot, asset;
     /// A quad drawn from one layer of the UI texture array.
     #[derive(Clone, Copy, Serialize, Deserialize)]
-    pub struct UiSprite { pub tex: u32, pub uv: AABB<Vec2>, pub color: [f32; 4] }: Hot, data;
+    pub struct UiSprite { pub tex: u32, pub uv: AABB<Vec2>, pub color: Vec4 }: Hot, asset;
     /// A piece of text drawn with the glyph atlas.
     #[derive(Clone, Serialize, Deserialize)]
     pub struct UiText {
         pub text: String,
         pub h_align: UiHAlign,
         pub v_align: UiVAlign,
-        pub color: [f32; 4],
+        pub color: Vec4,
         pub scale: f32,
-    }: Cold, data;
-    /// Marks an element as part of a screen, and orders it inside that screen.
-    #[derive(Clone, Copy)]
-    pub struct ScreenTag { pub screen: Id, pub priority: u32 }: Hot;
-
+    }: Cold, asset;
     /// A block drawn inside a UI element, filling the element's rectangle.
     #[derive(Clone, Copy, Serialize, Deserialize)]
-    pub struct UiBlock(Block): Cold, data;
+    pub struct UiBlock(Block): Cold, asset;
 }
 
 /// A block as it is written to a data file: the name of its type and its state,
@@ -81,50 +77,57 @@ pub enum UiVAlign {
     Bottom,
 }
 
-/// Registers the components of a screen element.
-fn register_components(components: &mut ComponentManager) {
-    components.register::<UiRect>("rect");
-    components.register::<UiSprite>("sprite");
-    components.register::<UiText>("text");
-    components.register::<ScreenTag>("screen_tag");
-    components.register::<Triggers>("trigger_tag");
-    components.register::<UiBlock>("block");
-}
-
-/// Registers the components, the resources, the systems and the data of the
-/// user interface.
+/// Registers the components, the resources and the systems of the user
+/// interface.
 pub(crate) fn register(
     entities: &mut EntityManager,
-    systems: &mut SystemManager,
+    systems: &mut SystemManager<2>,
     resources: &mut ResourceManager,
 ) {
-    register_components(&mut entities.components);
+    entities.components.register::<UiRect>("rect");
+    entities.components.register::<UiSprite>("sprite");
+    entities.components.register::<UiText>("text");
+    entities.components.register::<Triggers>("trigger_tag");
+    entities.components.register::<UiBlock>("block");
 
     resources.register("active_element", ActiveElement(None));
     resources.register("active_screens", ActiveScreens::default());
 
     systems.register(0, "cursor_tracker", CursorTracker);
     systems.register(1, "screen_controller", ScreenController);
-    systems.register(1, "screen_collector", ScreenCollector);
     systems.register(2, "ui_pointer", UiPointer);
+    systems.register(2, "hotbar_controller", HotbarController);
     systems.register(3, "highlighter", Highlighter::new(1.5, 0.5));
-
-    // A screen names the systems that handle the triggers of its elements, so
-    // the screens are built once the systems have been registered.
-    SCREEN_TYPES.init(build_screens(&entities.components, systems));
+    systems.register(3, "frame_rater", FrameRater::new(Duration::from_secs(1)));
 }
 
-/// Registers the resources and the system of the interface that need a canvas.
+/// Builds the screens and registers the resources and the system of the
+/// interface that need a canvas.
+///
+/// A screen names the block of an element and the systems that handle the
+/// triggers of its elements, so the screens are built once the blocks and the
+/// systems exist.
 pub(crate) fn register_canvas(
-    systems: &mut SystemManager,
+    entities: &mut EntityManager,
+    systems: &mut SystemManager<2>,
     resources: &mut ResourceManager,
     canvas: &Canvas,
 ) {
+    if let Err(e) = init_screen_types(&entities.components, systems) {
+        error!("failed to load screen types: {}", e);
+    }
+
     let mut viewports = Viewports::new(canvas, UI_WIDTH, UI_HEIGHT);
     viewports.transform(canvas);
     resources.register("viewports", viewports);
 
-    systems.register(4, "ui_renderer", UiRenderer::new(canvas));
+    // The interface is the last pass of a frame: it clears the depth buffer to
+    // sort its own elements with it, so a pass drawn after it would be tested
+    // against that depth instead of the depth of the world.
+    if let Err(e) = init_ui_textures(canvas) {
+        error!("failed to load ui textures: {e}");
+    }
+    systems.register(12, "ui_renderer", UiRenderer::new(canvas));
 }
 
 /// Spawns the screens the game starts with.
@@ -133,12 +136,10 @@ pub(crate) fn open_initial(entities: &mut EntityManager, resources: &ResourceMan
         .get::<ActiveScreens>()
         .expect("the active screens are registered")
         .get_mut::<ActiveScreens>();
-    let mut commands = Vec::new();
+    let mut ui = entities.commander().lock();
 
-    commands.extend(screens.open(id_of!(SCREEN_TYPES, "hud")));
-    commands.extend(screens.open(id_of!(SCREEN_TYPES, "hotbar")));
-
-    entities.submit(commands);
+    screens.open(SCREEN_TYPES.id_of("hud"), |element| ui.spawn(element));
+    screens.open(SCREEN_TYPES.id_of("hotbar"), |element| ui.spawn(element));
 }
 
 /// The instance data of one UI quad or glyph.

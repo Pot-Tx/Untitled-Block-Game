@@ -36,6 +36,20 @@ pub trait Trans4: Trans {
         aspect: Self::Scalar,
     ) -> Self;
 
+    /// Builds the orthographic projection of a box of `left` to `right`, of
+    /// `bottom` to `top` and of `near` to `far`.
+    ///
+    /// Depth is reversed here as well, so that a matrix of this kind can be
+    /// used with the `Greater` depth comparison of the render batches.
+    fn orthographic(
+        left: Self::Scalar,
+        right: Self::Scalar,
+        bottom: Self::Scalar,
+        top: Self::Scalar,
+        near: Self::Scalar,
+        far: Self::Scalar,
+    ) -> Self;
+
     /// Builds the matrix that maps a `width` by `height` viewport onto the
     /// surface, anchored to `alignment`.
     fn viewport(
@@ -122,6 +136,20 @@ macro_rules! impl_trans4_for {
 	                    0.0, 1.0 / tanf, 0.0, 0.0,
 	                    0.0, 0.0, near / range, -1.0,
 	                    0.0, 0.0, near * far / range, 0.0,
+                    ])
+                }
+
+	            fn orthographic(left: Self::Scalar, right: Self::Scalar, bottom: Self::Scalar, top: Self::Scalar, near: Self::Scalar, far: Self::Scalar) -> Self {
+                    let (x, y, z) = (
+                        1.0 / (right - left),
+                        1.0 / (top - bottom),
+                        1.0 / (far - near),
+                    );
+                    Self::from_cols_array(&[
+	                    2.0 * x, 0.0, 0.0, 0.0,
+	                    0.0, 2.0 * y, 0.0, 0.0,
+	                    0.0, 0.0, z, 0.0,
+	                    -(right + left) * x, -(top + bottom) * y, far * z, 1.0,
                     ])
                 }
 

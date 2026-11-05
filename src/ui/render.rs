@@ -1,25 +1,63 @@
 use crate::ecs::*;
+use crate::id_of;
 use crate::render::*;
 use crate::ui::*;
+use crate::util::OnceInit;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
-use crate::util::Id;
-use crate::world::{Block, BlockTextures, Meta};
+use crate::world::{BLOCK_TEXTURES, Block, BlockMeta};
 use glam::camera::rh::view::look_at_mat4;
-use glam::{Mat4, Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use glyph_brush::ab_glyph::FontArc;
 use glyph_brush::*;
 use log::error;
 use std::collections::HashMap;
-use std::fs::File;
 use wgpu::*;
 
-/// Layer of the UI atlas holding a white pixel, used to draw plain quads.
-const UI_WHITE: Id = 0;
-/// Layer of the UI atlas holding the crosshair.
-const UI_CROSSHAIR: Id = 1;
+/// The textures of the interface, drawn as the layers of one array, and the names of the
+/// layers, which are the files of `assets/textures/ui`. A layer is named by its file and
+/// numbered by its position among the names, which is what the screens of
+/// `assets/screens` name.
+static UI_TEXTURES: OnceInit<BindSet<TextureArraySampler>> = OnceInit::new();
+static UI_TEXTURE_HANDLES: OnceInit<Registry<()>> = OnceInit::new();
 
-/// Side length of the glyph atlas texture, and of the UI atlas.
+/// Loads the textures of the interface.
+pub(super) fn init_ui_textures(canvas: &Canvas) -> anyhow::Result<()> {
+    let (reg, _, view) = load_texture_array(
+        canvas,
+        "assets/textures/ui",
+        "ui",
+        TextureFormat::Rgba8UnormSrgb,
+        false,
+        |_| (),
+    )?;
+
+    let sampler = Sampler::new(
+        canvas,
+        &SamplerConfig {
+            name: "ui",
+            filter: FilterMode::Nearest,
+            address_mode: AddressMode::Repeat,
+            mipmap_filter: MipmapFilterMode::Linear,
+            mip_level_count: 1,
+            compare: None,
+        },
+    );
+
+    let binding = BindSet::new(
+        canvas,
+        &BindSetConfig {
+            name: "ui",
+            content: (&view, &sampler),
+        },
+    );
+
+    UI_TEXTURE_HANDLES.init(reg);
+    UI_TEXTURES.init(binding);
+    Ok(())
+}
+
+/// Side length of the glyph atlas texture.
 const ATLAS_SIZE: u32 = 1024;
 
 /// How much of the depth of an element the faces of its block use.
@@ -51,7 +89,7 @@ impl TextAtlas {
                 height: ATLAS_SIZE,
                 mip_level_count: 1,
                 format: TextureFormat::R8Unorm,
-                storage: false,
+                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
             },
         );
         let view = TextureView::new(
@@ -66,9 +104,11 @@ impl TextAtlas {
             canvas,
             &SamplerConfig {
                 name: "text",
+                filter: FilterMode::Nearest,
                 address_mode: AddressMode::Repeat,
                 mipmap_filter: MipmapFilterMode::Nearest,
                 mip_level_count: 1,
+                compare: None,
             },
         );
         let bind = BindSet::new(
@@ -114,11 +154,7 @@ impl TextAtlas {
             Section::default()
                 .with_screen_position((pos.x, pos.y))
                 .with_bounds((bounds.x, bounds.y))
-                .with_layout(
-                    Layout::default()
-                        .h_align(h_align)
-                        .v_align(v_align),
-                )
+                .with_layout(Layout::default().h_align(h_align).v_align(v_align))
                 .add_text(
                     Text::new(&text.text)
                         .with_scale(text.scale)
@@ -129,13 +165,11 @@ impl TextAtlas {
     }
 
     fn process(&mut self, canvas: &Canvas) -> anyhow::Result<Option<Vec<UiInst>>> {
-        let Self { texture, brush, .. } = self;
-
-        let action = brush.process_queued(
+        let action = self.brush.process_queued(
             |rect, data| {
                 canvas.queue.write_texture(
                     TexelCopyTextureInfo {
-                        texture,
+                        texture: &self.texture,
                         mip_level: 0,
                         origin: Origin3d {
                             x: rect.min[0],
@@ -158,7 +192,7 @@ impl TextAtlas {
                 );
             },
             |v| UiInst {
-                tex: UI_WHITE,
+                tex: id_of!(UI_TEXTURE_HANDLES, "white"),
                 min: Vec2::new(v.pixel_coords.min.x, v.pixel_coords.min.y),
                 max: Vec2::new(v.pixel_coords.max.x, v.pixel_coords.max.y),
                 z: v.extra.z,
@@ -183,23 +217,22 @@ impl TextAtlas {
 /// The quads and the glyphs are collected per viewport, because the z of an
 /// element only has to be comparable with the elements of its own viewport.
 pub(super) struct UiRenderer {
-    desc: RenderDescriptor<'static>,
-    quad_batch: RenderBatch<(Transformation, TextureArraySampler), (), UiInst>,
-    text_batch: RenderBatch<(Transformation, TextureSampler), (), UiInst>,
+    quad_batch:
+        RenderBatch<(Transformation, TextureArraySampler), (), UiInst, ColorDraw<1>, DepthDraw>,
+    text_batch: RenderBatch<(Transformation, TextureSampler), (), UiInst, ColorDraw<1>, DepthDraw>,
     block_batch: RenderBatch<
-        (TextureArraySampler, Transformation, Transformation),
+        (TextureArraySampler, CameraTransform, Transformation),
         NormTexVertex,
         UiBlockInst,
+        ColorDraw<1>,
+        DepthDraw,
     >,
     /// The camera every block of the interface is seen through. It never
     /// changes, so it is uploaded once and shared by every block.
-    block_camera: BindSet<Transformation>,
+    block_camera: BindSet<CameraTransform>,
     /// One mesh per block the interface shows, with the rectangles of the
     /// elements that show it.
-    blocks: HashMap<Meta, UiBlockModel>,
-    atlas: BindSet<TextureArraySampler>,
-    /// Number of layers of the atlas, which bounds the texture id of a sprite.
-    layers: u32,
+    blocks: HashMap<BlockMeta, UiBlockModel>,
     /// The identity transform of the fullscreen overlay, whose instances are
     /// already in normalised device coordinates.
     full: BindSet<Transformation>,
@@ -209,33 +242,36 @@ pub(super) struct UiRenderer {
     text: TextAtlas,
 }
 
-impl System for UiRenderer {
-    type CompQuery = (
-        CompRead<UiRect>,
-        CompRead<UiSprite>,
-        CompRead<UiText>,
-        OptionalRead<UiBlock>,
+impl System<2> for UiRenderer {
+    type CompQueries = (
+        (),
+        (
+            CompRead<UiRect>,
+            CompRead<UiSprite>,
+            CompRead<UiText>,
+            OptionalRead<UiBlock>,
+        ),
     );
     type ResQuery = (
         ResRead<Canvas>,
-        ResWrite<Option<Frame>>,
+        ResWrite<FrameSlot>,
         ResRead<ActiveScreens>,
         ResRead<Viewports>,
-        ResRead<BlockTextures>,
     );
 
     fn update(
         &mut self,
-        comp: Self::CompQuery,
-        res: Self::ResQuery,
-    ) -> Vec<Command> {
-        let (canvas, frame, screens, viewports, block_textures) = res.get();
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
+        let (canvas, frame, screens, viewports) = res;
 
-        if let Some(frame) = frame {
-            let rects = &comp.0;
-            let sprites = &comp.1;
-            let texts = &comp.2;
-            let blocks = &comp.3;
+        if let Some(frame) = frame.as_mut() {
+            let (rects, sprites, texts, blocks) = comp.1;
+            // The number of layers of the texture array, which bounds the layer a sprite
+            // names.
+            let layers = UI_TEXTURE_HANDLES.entries.len() as u32;
 
             // The depth of an item is normalised by the number of items, so the
             // items are counted before anything is laid out.
@@ -262,8 +298,10 @@ impl System for UiRenderer {
 
             let mut quads = vec![Vec::new(); ViewPortAlignment::ALL.len()];
             let mut queued = vec![Vec::new(); ViewPortAlignment::ALL.len()];
-            let mut shown = vec![HashMap::<Meta, (Block, Vec<UiBlockInst>)>::new();
-                ViewPortAlignment::ALL.len()];
+            let mut shown = vec![
+                HashMap::<BlockMeta, (Block, Vec<UiBlockInst>)>::new();
+                ViewPortAlignment::ALL.len()
+            ];
             let mut dim = Vec::new();
 
             for screen in &screens.order {
@@ -275,7 +313,7 @@ impl System for UiRenderer {
 
                 if screen_type.pauses && dim.is_empty() {
                     dim.push(UiInst {
-                        tex: UI_WHITE,
+                        tex: id_of!(UI_TEXTURE_HANDLES, "white"),
                         min: Vec2::ZERO,
                         max: Vec2::ONE,
                         z: next_z(&mut layer),
@@ -294,16 +332,16 @@ impl System for UiRenderer {
                         // A sprite that names a layer the atlas does not have
                         // would sample the wrong texture, so the id is clamped;
                         // debug builds point at the mistake instead.
-                        debug_assert!(sprite.tex < self.layers);
+                        debug_assert!(sprite.tex < layers);
 
                         quads[view].push(UiInst {
-                            tex: sprite.tex.min(self.layers - 1),
+                            tex: sprite.tex.min(layers - 1),
                             min: rect.0.min,
                             max: rect.0.max,
                             z: next_z(&mut layer),
                             min_uv: sprite.uv.min,
                             max_uv: sprite.uv.max,
-                            color: sprite.color,
+                            color: sprite.color.into(),
                         });
                     }
 
@@ -362,23 +400,37 @@ impl System for UiRenderer {
 
             // All viewports are drawn in the same pass, so their depth values are
             // comparable and the dim overlay can cover the ones below it.
-            frame.render(&self.desc, |mut pass| {
+            let colors = [ColorTarget {
+                view: &canvas.color_view,
+                load: LoadOp::Load,
+            }];
+            let depth = DepthTarget {
+                view: &canvas.depth_view,
+                load: LoadOp::Clear(0.0),
+            };
+
+            frame.render::<ColorDraw<1>, DepthDraw>("ui", colors, depth, |mut pass| {
                 for alignment in ViewPortAlignment::ALL {
                     let view = alignment.idx();
                     let viewport = viewports.get(*alignment);
 
                     self.quad_batch.begin(&mut pass);
                     self.quad_batch
-                        .push(&mut pass, (&viewport.transform, &self.atlas));
+                        .push(&mut pass, (&viewport.transform, &UI_TEXTURES));
                     self.quad_batch.draw(&mut pass, &UiList(&self.quads[view]));
-                    
+
                     self.block_batch.begin(&mut pass);
                     self.block_batch.push(
                         &mut pass,
-                        (&block_textures.0, &self.block_camera, &viewport.transform),
+                        (&BLOCK_TEXTURES, &self.block_camera, &viewport.transform),
                     );
-                    self.block_batch
-                        .draw(&mut pass, &UiBlocks(&self.blocks, view));
+                    self.block_batch.draw(
+                        &mut pass,
+                        &UiBlocks {
+                            models: &self.blocks,
+                            alignment: *alignment,
+                        },
+                    );
 
                     self.text_batch.begin(&mut pass);
                     self.text_batch
@@ -387,38 +439,16 @@ impl System for UiRenderer {
                 }
 
                 self.quad_batch.begin(&mut pass);
-                self.quad_batch.push(&mut pass, (&self.full, &self.atlas));
+                self.quad_batch.push(&mut pass, (&self.full, &UI_TEXTURES));
                 self.quad_batch.draw(&mut pass, &UiList(&self.dim));
             });
         }
-
-        Vec::new()
     }
 }
 
 impl UiRenderer {
     /// Creates the batches, the buffers and the atlases of the UI.
     pub fn new(canvas: &Canvas) -> Self {
-        let crosshair = Tex::from_png(
-            File::open("assets/textures/crosshair.png").expect("failed to open the crosshair"),
-        )
-        .expect("failed to load the crosshair");
-        let mut textures = Registry::<Tex>::new();
-        // The layers of an array texture must all have the same size, so the
-        // white layer is created with the size of the crosshair.
-        textures.register(
-            UI_WHITE,
-            "white",
-            Tex {
-                width: crosshair.width,
-                height: crosshair.height,
-                data: vec![255; (crosshair.width * crosshair.height * 4) as usize],
-            },
-        );
-        textures.register(UI_CROSSHAIR, "crosshair", crosshair);
-
-        let layers = textures.entries.len() as u32;
-        let atlas = textures.create_texture_sampler(canvas, "ui", false);
         // Maps the unit square onto the whole window, in normalised device
         // coordinates.
         let full_buffer = Buffer::new(
@@ -446,7 +476,12 @@ impl UiRenderer {
             canvas,
             &BufferConfig {
                 name: "ui_block_camera",
-                init: BufferInit::Content(&[Self::block_camera()]),
+                init: BufferInit::Content(&[CameraTransform {
+                    matrix: Self::block_camera(),
+                    // The blocks of the interface are not sprites, so nothing
+                    // turns towards the camera that draws them.
+                    position: Vec4::ZERO,
+                }]),
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             },
         );
@@ -459,17 +494,16 @@ impl UiRenderer {
         );
 
         Self {
-            desc: RenderDescriptor {
-                name: "ui",
-                color_load: LoadOp::Load,
-                depth_load: LoadOp::Clear(0.0),
-            },
             quad_batch: RenderBatch::new(
                 canvas,
                 &RenderBatchConfig {
                     name: "ui",
                     shader: "ui",
-                    translucent: true,
+                    color_formats: [Canvas::SCENE_COLOR_FORMAT],
+                    depth_format: Canvas::SCENE_DEPTH_FORMAT,
+                    cull: Some(Face::Back),
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    secondary_blend: None,
                     topology: PrimitiveTopology::TriangleList,
                     depth_write: true,
                 },
@@ -479,7 +513,11 @@ impl UiRenderer {
                 &RenderBatchConfig {
                     name: "ui_text",
                     shader: "text",
-                    translucent: true,
+                    color_formats: [Canvas::SCENE_COLOR_FORMAT],
+                    depth_format: Canvas::SCENE_DEPTH_FORMAT,
+                    cull: Some(Face::Back),
+                    blend: Some(BlendState::ALPHA_BLENDING),
+                    secondary_blend: None,
                     topology: PrimitiveTopology::TriangleList,
                     depth_write: true,
                 },
@@ -491,15 +529,17 @@ impl UiRenderer {
                     shader: "ui_block",
                     // Blocks are drawn opaque; translucent ones would need a
                     // batch of their own, drawn after the opaque geometry.
-                    translucent: false,
+                    color_formats: [Canvas::SCENE_COLOR_FORMAT],
+                    depth_format: Canvas::SCENE_DEPTH_FORMAT,
+                    cull: Some(Face::Back),
+                    blend: None,
+                    secondary_blend: None,
                     topology: PrimitiveTopology::TriangleList,
                     depth_write: true,
                 },
             ),
             block_camera,
             blocks: HashMap::new(),
-            atlas,
-            layers,
             full,
             quads: ViewPortAlignment::ALL
                 .iter()
@@ -539,10 +579,22 @@ impl UiRenderer {
         // camera: the near plane maps to 1 and the far plane to 0, which
         // matches the `Greater` comparison the batches use.
         let proj = Mat4::from_cols_array(&[
-            1.0 / radius, 0.0, 0.0, 0.0,
-            0.0, -1.0 / radius, 0.0, 0.0,
-            0.0, 0.0, 1.0 / (far - near), 0.0,
-            0.0, 0.0, far / (far - near), 1.0,
+            1.0 / radius,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            -1.0 / radius,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0 / (far - near),
+            0.0,
+            0.0,
+            0.0,
+            far / (far - near),
+            1.0,
         ]);
 
         proj * view
@@ -593,14 +645,22 @@ impl UiBlockModel {
 }
 
 /// The blocks of one viewport, as geometry that the block batch draws.
-struct UiBlocks<'a>(&'a HashMap<Meta, UiBlockModel>, usize);
+struct UiBlocks<'a> {
+    models: &'a HashMap<BlockMeta, UiBlockModel>,
+    alignment: ViewPortAlignment,
+}
 
 impl Render<NormTexVertex, UiBlockInst> for UiBlocks<'_> {
     fn rendered(&self) -> Vec<RenderItem<'_, NormTexVertex, UiBlockInst>> {
-        self.0
+        self.models
             .values()
             .filter_map(|model| {
-                RenderItem::new(&model.vertices, &model.indices, &model.instances[self.1]).ok()
+                RenderItem::new(
+                    &model.vertices,
+                    &model.indices,
+                    &model.instances[self.alignment.idx()],
+                )
+                .ok()
             })
             .collect()
     }

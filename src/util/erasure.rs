@@ -1,8 +1,8 @@
-use crate::util::collection::{SparseSet, SparseSetIter};
 use crate::util::Id;
+use crate::util::collection::{SparseSet, SparseSetIter};
 use std::alloc::Layout;
 use std::cell::UnsafeCell;
-use std::collections::{hash_map, HashMap};
+use std::collections::{HashMap, hash_map};
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::{alloc, fmt, mem, ptr};
@@ -16,6 +16,26 @@ pub struct ErasedBox {
     layout: Layout,
     drop: Option<fn(*mut u8)>,
     clone: Option<fn(*const u8) -> ErasedBox>,
+}
+
+/// A borrowed, type-erased view of a value.
+///
+/// [`ErasedBox`] owns the value it holds, but a value that lives inside a dense
+/// or hash map is only reachable through a shared borrow, so a codec is handed
+/// this instead.
+#[derive(Clone, Copy)]
+pub struct ErasedRef<'a> {
+    ptr: *const u8,
+    layout: Layout,
+    _marker: PhantomData<&'a ()>,
+}
+
+impl ErasedRef<'_> {
+    #[inline]
+    pub fn cast<T: 'static>(&self) -> &T {
+        debug_assert_eq!(self.layout, Layout::new::<T>());
+        unsafe { &*(self.ptr as *const T) }
+    }
 }
 
 /// The elements are stored as bytes in `data`, whose length is therefore the
@@ -35,7 +55,7 @@ pub struct ErasedDenseMap {
 }
 
 pub struct ErasedHashMap {
-    ids: HashMap<Id, Id>,
+    ids: HashMap<Id, usize>,
     items: ErasedVec,
 }
 
@@ -52,13 +72,13 @@ pub struct ErasedDenseMapIterMut<'a, T> {
 }
 
 pub struct ErasedHashMapIter<'a, T> {
-    id_iter: hash_map::Iter<'a, Id, Id>,
+    id_iter: hash_map::Iter<'a, Id, usize>,
     items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
 
 pub struct ErasedHashMapIterMut<'a, T> {
-    id_iter: hash_map::Iter<'a, Id, Id>,
+    id_iter: hash_map::Iter<'a, Id, usize>,
     items: &'a ErasedVec,
     _marker: PhantomData<T>,
 }
@@ -135,9 +155,20 @@ impl ErasedBox {
     /// reference elsewhere in the ECS; the caller is responsible for not
     /// creating two mutable borrows of the same value.
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub fn cast_mut<T: 'static>(&self) -> &mut T {
         debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &mut *(self.ptr as *mut T) }
+    }
+
+    /// The value as a borrowed, type-erased view.
+    #[inline]
+    pub fn as_ref(&self) -> ErasedRef<'_> {
+        ErasedRef {
+            ptr: self.ptr,
+            layout: self.layout,
+            _marker: PhantomData,
+        }
     }
 
     /// Leaks the value, so that dropping the box no longer destroys it.
@@ -221,9 +252,21 @@ impl ErasedVec {
 
     /// Takes `&self` for the same reason as [`ErasedBox::cast_mut`].
     #[inline]
+    #[allow(clippy::mut_from_ref)]
     pub fn get_mut<T>(&self, idx: usize) -> &mut T {
         debug_assert_eq!(self.layout, Layout::new::<T>());
         unsafe { &mut *self.get_mut_ptr(idx) }
+    }
+
+    /// A borrowed, type-erased view of the element at `idx`.
+    #[inline]
+    pub fn ref_of(&self, idx: usize) -> ErasedRef<'_> {
+        debug_assert!(idx < self.len());
+        ErasedRef {
+            ptr: self.get_ptr::<u8>(idx),
+            layout: self.layout,
+            _marker: PhantomData,
+        }
     }
 
     #[inline]
@@ -355,7 +398,7 @@ impl ErasedDenseMap {
     #[inline]
     pub fn get<T>(&self, id: Id) -> Option<&T> {
         match self.ids.find(id) {
-            Some(idx) => Some(self.items.get(idx as usize)),
+            Some(idx) => Some(self.items.get(idx)),
             None => None,
         }
     }
@@ -363,7 +406,15 @@ impl ErasedDenseMap {
     #[inline]
     pub fn get_mut<T>(&self, id: Id) -> Option<&mut T> {
         match self.ids.find(id) {
-            Some(idx) => Some(self.items.get_mut(idx as usize)),
+            Some(idx) => Some(self.items.get_mut(idx)),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub fn ref_of(&self, id: Id) -> Option<ErasedRef<'_>> {
+        match self.ids.find(id) {
+            Some(idx) => Some(self.items.ref_of(idx)),
             None => None,
         }
     }
@@ -387,10 +438,10 @@ impl ErasedDenseMap {
     #[inline]
     pub fn insert<T>(&mut self, id: Id, item: T) -> Option<T> {
         match self.ids.find(id) {
-            Some(idx) => Some(mem::replace(self.items.get_mut(idx as usize), item)),
+            Some(idx) => Some(mem::replace(self.items.get_mut(idx), item)),
             None => {
                 let idx = self.items.len();
-                self.ids.put(id, idx as Id);
+                self.ids.put(id, idx);
                 self.items.push(item);
                 None
             }
@@ -404,7 +455,7 @@ impl ErasedDenseMap {
                 unsafe {
                     ptr::copy(
                         item.ptr,
-                        self.items.get_mut_ptr(idx as usize),
+                        self.items.get_mut_ptr(idx),
                         self.items.layout.size(),
                     );
                 }
@@ -412,7 +463,7 @@ impl ErasedDenseMap {
             }
             None => {
                 let idx = self.items.len();
-                self.ids.put(id, idx as Id);
+                self.ids.put(id, idx);
                 self.items.push_erased(item);
             }
         }
@@ -422,8 +473,8 @@ impl ErasedDenseMap {
     pub fn remove<T>(&mut self, id: Id) -> Option<T> {
         match self.ids.find(id) {
             Some(idx) => {
-                self.ids.kick(id, idx);
-                Some(self.items.swap_remove(idx as usize))
+                self.ids.kick(idx);
+                Some(self.items.swap_remove(idx))
             }
             None => None,
         }
@@ -432,8 +483,8 @@ impl ErasedDenseMap {
     #[inline]
     pub fn remove_and_drop(&mut self, id: Id) {
         if let Some(idx) = self.ids.find(id) {
-            self.ids.kick(id, idx);
-            self.items.swap_remove_and_drop(idx as usize);
+            self.ids.kick(idx);
+            self.items.swap_remove_and_drop(idx);
         }
     }
 }
@@ -455,7 +506,7 @@ impl ErasedHashMap {
     #[inline]
     pub fn get<T>(&self, id: Id) -> Option<&T> {
         match self.ids.get(&id) {
-            Some(&idx) => Some(self.items.get(idx as usize)),
+            Some(&idx) => Some(self.items.get(idx)),
             None => None,
         }
     }
@@ -463,7 +514,15 @@ impl ErasedHashMap {
     #[inline]
     pub fn get_mut<T>(&self, id: Id) -> Option<&mut T> {
         match self.ids.get(&id) {
-            Some(&idx) => Some(self.items.get_mut(idx as usize)),
+            Some(&idx) => Some(self.items.get_mut(idx)),
+            None => None,
+        }
+    }
+
+    #[inline]
+    pub fn ref_of(&self, id: Id) -> Option<ErasedRef<'_>> {
+        match self.ids.get(&id) {
+            Some(&idx) => Some(self.items.ref_of(idx)),
             None => None,
         }
     }
@@ -487,10 +546,10 @@ impl ErasedHashMap {
     #[inline]
     pub fn insert<T>(&mut self, id: Id, item: T) -> Option<T> {
         match self.ids.get(&id) {
-            Some(&idx) => Some(mem::replace(self.items.get_mut(idx as usize), item)),
+            Some(&idx) => Some(mem::replace(self.items.get_mut(idx), item)),
             None => {
                 let idx = self.items.len();
-                self.ids.insert(id, idx as Id);
+                self.ids.insert(id, idx);
                 self.items.push(item);
                 None
             }
@@ -504,7 +563,7 @@ impl ErasedHashMap {
                 unsafe {
                     ptr::copy(
                         item.ptr,
-                        self.items.get_mut_ptr(idx as usize),
+                        self.items.get_mut_ptr(idx),
                         self.items.layout.size(),
                     );
                 }
@@ -512,7 +571,7 @@ impl ErasedHashMap {
             }
             None => {
                 let idx = self.items.len();
-                self.ids.insert(id, idx as Id);
+                self.ids.insert(id, idx);
                 self.items.push_erased(item);
             }
         }
@@ -528,11 +587,11 @@ impl ErasedHashMap {
                 if let Some((&id, _idx)) = self
                     .ids
                     .iter()
-                    .find(|(_id, idx)| **idx as usize + 1 == self.items.len())
+                    .find(|(_id, idx)| **idx + 1 == self.items.len())
                 {
                     self.ids.insert(id, idx);
                 }
-                Some(self.items.swap_remove(idx as usize))
+                Some(self.items.swap_remove(idx))
             }
             None => None,
         }
@@ -545,11 +604,11 @@ impl ErasedHashMap {
             if let Some((&id, _idx)) = self
                 .ids
                 .iter()
-                .find(|(_id, idx)| **idx as usize + 1 == self.items.len())
+                .find(|(_id, idx)| **idx + 1 == self.items.len())
             {
                 self.ids.insert(id, idx);
             }
-            self.items.swap_remove_and_drop(idx as usize);
+            self.items.swap_remove_and_drop(idx);
         }
     }
 }
@@ -583,7 +642,7 @@ impl<'a, T: 'a> Iterator for ErasedHashMapIter<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.id_iter.next() {
-            Some((&id, &idx)) => Some((id, self.items.get(idx as usize))),
+            Some((&id, &idx)) => Some((id, self.items.get(idx))),
             None => None,
         }
     }
@@ -594,7 +653,7 @@ impl<'a, T: 'a> Iterator for ErasedHashMapIterMut<'a, T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.id_iter.next() {
-            Some((&id, &idx)) => Some((id, self.items.get_mut(idx as usize))),
+            Some((&id, &idx)) => Some((id, self.items.get_mut(idx))),
             None => None,
         }
     }

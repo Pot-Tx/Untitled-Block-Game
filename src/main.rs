@@ -1,6 +1,6 @@
 //! Entry point of the game: installs the panic hook and runs the event loop.
 
-use core::game::Game;
+use block_game::game::Game;
 use std::panic;
 use winit::error::EventLoopError;
 

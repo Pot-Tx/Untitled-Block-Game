@@ -5,12 +5,22 @@ pub mod erasure;
 pub mod math;
 pub mod transform;
 
+use anyhow::anyhow;
 use log::error;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::collections::VecDeque;
+use std::fs;
+use std::fs::File;
+use std::io::Write;
 use std::ops::Deref;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Identifier of an entity, component, resource, or registry entry.
+/// Identifier of an entity or of a registry entry.
+///
+/// Components and resources are named by their [`TypeId`](std::any::TypeId)
+/// instead, because there is exactly one of each kind per type.
 pub type Id = u32;
 
 /// Hands out entity ids, reusing the ids of removed entities through a free list.
@@ -143,7 +153,7 @@ impl<T> OnceInit<T> {
     /// Stores `value`, logging an error when the cell was already initialised.
     pub fn init(&self, value: T) {
         if self.inner.set(value).is_err() {
-            error!("OnceInit already initialized");
+            error!("OnceInit has already been initialized");
         }
     }
 }
@@ -241,4 +251,86 @@ impl<T> SwapPair<T> {
             self.left.as_ref()
         }
     }
+}
+
+/// The files of the directory `dir`, ordered by name.
+///
+/// A directory lists its entries in an order of its own, which differs between
+/// file systems and even between two runs on one of them, so anything that
+/// numbers the files of a directory by their position sorts them first.
+pub fn files_in(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_file() {
+            files.push(path);
+        }
+    }
+
+    files.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    Ok(files)
+}
+
+/// Reads the document of a save file, or `None` when the file does not exist.
+///
+/// A file that exists but does not carry `magic` and `version` is an error, so
+/// that the save of another world or another build is not read as garbage.
+pub fn read_file<T: DeserializeOwned>(
+    path: &Path,
+    magic: &[u8; 4],
+    version: u32,
+) -> anyhow::Result<Option<T>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    if bytes.len() < 8 || &bytes[0..4] != magic {
+        return Err(anyhow!("{} is not a save file", path.display()));
+    }
+
+    let found = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+
+    if found != version {
+        return Err(anyhow!(
+            "{} has the version {found}, which this build cannot read",
+            path.display()
+        ));
+    }
+
+    postcard::from_bytes(&bytes[8..])
+        .map(Some)
+        .map_err(|e| anyhow!("failed to decode {}: {e}", path.display()))
+}
+
+/// Writes a save file: a magic, a version and the document behind them.
+pub fn write_file<T: Serialize>(
+    path: &Path,
+    magic: &[u8; 4],
+    version: u32,
+    value: &T,
+) -> anyhow::Result<()> {
+    let payload =
+        postcard::to_stdvec(value).map_err(|e| anyhow!("failed to encode a save: {e}"))?;
+
+    let mut bytes = Vec::with_capacity(8 + payload.len());
+    bytes.extend_from_slice(magic);
+    bytes.extend_from_slice(&version.to_le_bytes());
+    bytes.extend_from_slice(&payload);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let temp = path.with_extension("tmp");
+    let mut file = File::create(&temp)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp, path)?;
+
+    Ok(())
 }

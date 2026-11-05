@@ -1,22 +1,22 @@
 use crate::actor::*;
-use crate::{by_name, id_of};
+use crate::by_name;
 use crate::components;
 use crate::ecs::*;
 use crate::game::*;
 use crate::render::*;
+use crate::util::Id;
 use crate::util::bounding::{AABBGroup, Ray};
 use crate::util::coord::{Direction, ICoord3};
-use crate::util::Id;
-use crate::world::{BLOCK_TYPES, Block, BlockPos, World};
+use crate::world::{Block, BlockPos, World};
 use glam::Vec3;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use wgpu::{LoadOp, PrimitiveTopology};
+use wgpu::{Face, LoadOp, PrimitiveTopology};
 
 components! {
     /// Marks the actor the player steers, together with what it is looking at
     /// and what an interaction would affect.
     #[derive(Clone, Copy)]
-    pub struct PlayerControlled { pub selection: Option<SelectedItem> }: Cold, data;
+    pub struct PlayerControlled { pub selection: Option<SelectedItem> }: Cold, asset, save;
 }
 
 /// The selection is derived from the world every tick, so it is not written; an
@@ -92,213 +92,243 @@ pub(super) struct Interactor;
 
 /// Draws the outline of the current selection.
 pub(super) struct SelectionRenderer {
-    desc: RenderDescriptor<'static>,
-    batch: RenderBatch<Transformation, BasicVertex, TransInst>,
+    batch: RenderBatch<CameraTransform, BasicVertex, TransInst, ColorDraw<1>, DepthDraw>,
     vertices: BufferVec<BasicVertex>,
     indices: BufferVec<u16>,
     instances: BufferVec<TransInst>,
 }
 
-impl System for PlayerController {
-    type CompQuery = (
+impl System<1> for PlayerController {
+    type CompQueries = ((
         CompRead<PlayerControlled>,
         CompWrite<Velocity>,
         CompRead<Rotation>,
         CompRead<Speed>,
         OptionalRead<Flight>,
         OptionalRead<Bound>,
-    );
-    type ResQuery = ResRead<InputState>;
+    ),);
+    type ResQuery = (ResRead<InputState>,);
 
-    fn operate(
+    fn update(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
-        if res.cursor_grabbed {
-            let mut dir = Vec3::ZERO;
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 1],
+    ) {
+        let (inputs,) = res;
+        for entry in comp.0.iter() {
+            if inputs.cursor_grabbed {
+                let mut dir = Vec3::ZERO;
 
-            if res.is_input_present(by_name!(INPUT_MAP, "forward")) {
-                dir.z += 1.0;
-            }
+                if inputs.is_input_present(by_name!(INPUT_MAP, "forward")) {
+                    dir.z -= 1.0;
+                }
 
-            if res.is_input_present(by_name!(INPUT_MAP, "left")) {
-                dir.x -= 1.0;
-            }
+                if inputs.is_input_present(by_name!(INPUT_MAP, "left")) {
+                    dir.x -= 1.0;
+                }
 
-            if res.is_input_present(by_name!(INPUT_MAP, "backward")) {
-                dir.z -= 1.0;
-            }
+                if inputs.is_input_present(by_name!(INPUT_MAP, "backward")) {
+                    dir.z += 1.0;
+                }
 
-            if res.is_input_present(by_name!(INPUT_MAP, "right")) {
-                dir.x += 1.0;
-            }
+                if inputs.is_input_present(by_name!(INPUT_MAP, "right")) {
+                    dir.x += 1.0;
+                }
 
-            let mut speed = entry.4.0;
-            match entry.5 {
-                // Without flight, the player may only jump from the ground; the
-                // speed is reduced in every other case, which keeps the player
-                // from drifting sideways in the air.
-                None => {
-                    if let Some(bound) = entry.6 {
-                        if let Some(p) = bound.contact[Axis::Y.idx()]
-                            && !p
-                        {
-                            if res.is_input_present(by_name!(INPUT_MAP, "ascend")) {
-                                entry.2.0.y = 0.75;
+                let (_, _, vel, rot, Speed { walk, jump }, flight, bound) = entry;
+
+                let mut walk = *walk;
+                match flight {
+                    // Without flight, the player may only jump from the ground;
+                    // the speed is reduced in every other case, which keeps the
+                    // player from drifting sideways in the air.
+                    None => {
+                        if let Some(bound) = bound {
+                            if let Some(p) = bound.contact[Axis::Y.idx()]
+                                && !p
+                            {
+                                if inputs.is_input_present(by_name!(INPUT_MAP, "ascend")) {
+                                    vel.0.y = *jump;
+                                }
+                            } else {
+                                walk *= 0.0625;
                             }
-                        } else {
-                            speed *= 0.0625;
+                        }
+                    }
+
+                    Some(_) => {
+                        if inputs.is_input_present(by_name!(INPUT_MAP, "ascend")) {
+                            dir.y += 1.0;
+                        }
+
+                        if inputs.is_input_present(by_name!(INPUT_MAP, "descend")) {
+                            dir.y -= 1.0;
                         }
                     }
                 }
 
-                Some(_) => {
-                    if res.is_input_present(by_name!(INPUT_MAP, "ascend")) {
-                        dir.y += 1.0;
-                    }
-
-                    if res.is_input_present(by_name!(INPUT_MAP, "descend")) {
-                        dir.y -= 1.0;
-                    }
-                }
+                vel.accelerate(walk, dir.rotate_y(-rot.0[0]));
             }
-
-            entry.2.accelerate(entry.3, &Speed(speed), dir);
         }
-
-        None
     }
 }
 
-impl System for PlayerRotator {
-    type CompQuery = (CompRead<PlayerControlled>, CompWrite<Rotation>);
-    type ResQuery = ResRead<InputState>;
+impl System<2> for PlayerRotator {
+    type CompQueries = ((CompRead<PlayerControlled>, CompWrite<Rotation>), ());
+    type ResQuery = (ResRead<InputState>,);
 
-    fn operate(
+    fn update(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
-        if res.cursor_grabbed {
-            entry.2.rotate(res.mouse_motion * *MOUSE_SENSITIVITY);
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
+        for entry in comp.0.iter() {
+            if res.0.cursor_grabbed {
+                entry.2.rotate(res.0.mouse_motion * *MOUSE_SENSITIVITY);
+            }
         }
-
-        None
     }
 }
 
-impl System for Selector {
-    type CompQuery = (
+impl System<1> for Selector {
+    type CompQueries = ((
         CompWrite<PlayerControlled>,
         CompRead<Position>,
         CompRead<Rotation>,
-    );
-    type ResQuery = ResRead<World>;
+        OptionalRead<Eye>,
+    ),);
+    type ResQuery = (ResRead<World>,);
 
-    fn operate(
+    fn update(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
-        let ray = Ray {
-            origin: entry.2.cur,
-            direction: entry.3.direction(),
-        };
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 1],
+    ) {
+        for entry in comp.0.iter() {
+            // The player looks from its eyes, which are above its feet.
+            let ray = Ray {
+                origin: entry.2.cur + Vec3::Y * entry.4.map_or(0.0, |eye| eye.0),
+                direction: entry.3.direction(),
+            };
 
-        // The player can only reach a few blocks.
-        entry.1.selection = ray.traverse(res, 8.0);
-
-        None
+            // The player can only reach a few blocks.
+            entry.1.selection = ray.traverse(res.0, 8.0);
+        }
     }
 }
 
-impl System for Interactor {
-    type CompQuery = (CompRead<PlayerControlled>, CompRead<Position>, CompRead<Bound>);
+impl System<2> for Interactor {
+    type CompQueries = (
+        (
+            CompRead<PlayerControlled>,
+            CompRead<Position>,
+            OptionalRead<Bound>,
+            CompRead<Inventory>,
+        ),
+        (),
+    );
     type ResQuery = (ResRead<InputState>, ResWrite<World>);
 
-    fn operate(
+    fn update(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
         if !res.0.cursor_grabbed {
-            return None;
+            return;
         }
 
-        if let Some(selected) = entry.1.selection {
-            if res.0.is_input_present(by_name!(INPUT_MAP, "attack")) {
-                match selected {
-                    // Breaking a block replaces it with air.
-                    SelectedItem::Block { pos, .. } => {
-                        res.1.set_block(pos, Block::air());
-                    }
-
-                    SelectedItem::Actor { .. } => (),
-                }
-            }
-
-            if res.0.is_input_present(by_name!(INPUT_MAP, "interact")) {
-                match selected {
-                    // Placing a block needs the face the ray entered through,
-                    // and it has to be free of the player's own collision box.
-                    SelectedItem::Block { pos, face, .. } => {
-                        let block = Block::default_of(id_of!(BLOCK_TYPES, "bricks"));
-                        let bound = entry.3.translate(entry.2);
-
-                        if block
-                            .bounds(pos.step(face))
-                            .into_iter()
-                            .all(|b| !bound.intersects_with(b))
-                        {
-                            res.1.set_block(pos.step(face), block);
+        for (_, controlled, position, bound, inventory) in comp.0.iter() {
+            if let Some(selected) = controlled.selection {
+                if res.0.is_input_present(by_name!(INPUT_MAP, "attack")) {
+                    match selected {
+                        // Breaking a block replaces it with air.
+                        SelectedItem::Block { pos, .. } => {
+                            res.1.set_block(pos, Block::air());
                         }
-                    }
 
-                    SelectedItem::Actor { .. } => (),
+                        SelectedItem::Actor { .. } => (),
+                    }
+                }
+
+                if res.0.is_input_present(by_name!(INPUT_MAP, "interact")) {
+                    match selected {
+                        // Placing a block needs the face the ray entered
+                        // through, and it has to be free of the player's own
+                        // collision box.
+                        SelectedItem::Block { pos, face, .. } => {
+                            let current = inventory.get(inventory.cur);
+                            let bound = bound.map(|b| b.translate(position));
+
+                            if let Some(block) = current
+                                && bound.is_none_or(|b| {
+                                    block
+                                        .bounds(pos.step(face))
+                                        .into_iter()
+                                        .all(|b1| !b.intersects_with(b1))
+                                })
+                            {
+                                res.1.set_block(pos.step(face), block);
+                            }
+                        }
+
+                        SelectedItem::Actor { .. } => (),
+                    }
                 }
             }
         }
-
-        None
     }
 }
 
-impl System for SelectionRenderer {
-    type CompQuery = CompRead<PlayerControlled>;
-    type ResQuery = (ResWrite<Option<Frame>>, ResRead<Camera>, ResRead<Canvas>);
+impl System<2> for SelectionRenderer {
+    type CompQueries = ((CompRead<PlayerControlled>,), ());
+    type ResQuery = (ResWrite<FrameSlot>, ResRead<Camera>, ResRead<Canvas>);
 
-    fn operate(
+    fn update(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
-        let canvas = res.2;
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
+        for entry in comp.0.iter() {
+            let canvas = res.2;
 
-        match entry.1.selection {
-            Some(item) => {
-                let mesh = item.mesh();
-                self.vertices.set_content(canvas, &mesh.vertices);
-                self.indices.set_content(canvas, &mesh.indices);
-                self.instances.set_content(canvas, &[item.inst()]);
+            match entry.1.selection {
+                Some(item) => {
+                    let mesh = item.mesh();
+                    self.vertices.set_content(canvas, &mesh.vertices);
+                    self.indices.set_content(canvas, &mesh.indices);
+                    self.instances.set_content(canvas, &[item.inst()]);
+                }
+
+                None => {
+                    self.vertices.set_content(canvas, &[]);
+                    self.indices.set_content(canvas, &[]);
+                    self.instances.set_content(canvas, &[]);
+                }
             }
 
-            None => {
-                self.vertices.set_content(canvas, &[]);
-                self.indices.set_content(canvas, &[]);
-                self.instances.set_content(canvas, &[]);
+            if let Some(frame) = res.0.as_mut() {
+                let colors = [ColorTarget {
+                    view: &canvas.color_view,
+                    load: LoadOp::Load,
+                }];
+                let depth = DepthTarget {
+                    view: &canvas.depth_view,
+                    load: LoadOp::Load,
+                };
+
+                frame.render::<ColorDraw<1>, DepthDraw>("selection", colors, depth, |mut pass| {
+                    self.batch.begin(&mut pass);
+                    self.batch.push(&mut pass, &res.1.transform);
+                    self.batch.draw(&mut pass, self);
+                });
             }
         }
-
-        if let Some(frame) = res.0 {
-            frame.render(&self.desc, |mut pass| {
-                self.batch.begin(&mut pass);
-                self.batch.push(&mut pass, &res.1.transform);
-                self.batch.draw(&mut pass, self);
-            });
-        }
-
-        None
     }
 }
 
@@ -317,17 +347,16 @@ impl Render<BasicVertex, TransInst> for SelectionRenderer {
 impl SelectionRenderer {
     pub fn new(canvas: &Canvas) -> Self {
         Self {
-            desc: RenderDescriptor {
-                name: "selection",
-                color_load: LoadOp::Load,
-                depth_load: LoadOp::Load,
-            },
             batch: RenderBatch::new(
                 canvas,
                 &RenderBatchConfig {
                     name: "selection",
                     shader: "selection",
-                    translucent: false,
+                    color_formats: [Canvas::SCENE_COLOR_FORMAT],
+                    depth_format: Canvas::SCENE_DEPTH_FORMAT,
+                    cull: Some(Face::Back),
+                    blend: None,
+                    secondary_blend: None,
                     topology: PrimitiveTopology::LineList,
                     depth_write: false,
                 },

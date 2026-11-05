@@ -1,1 +1,4 @@
 /target
+/mods/*/target
+assets/cuboid_layout.png
+AGENTS.md

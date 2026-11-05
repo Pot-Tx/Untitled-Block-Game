@@ -12,12 +12,18 @@ struct FragmentOut {
     @builtin(frag_depth) depth: f32,
 }
 
+// The transform of the camera and the position it stands at.
+struct Camera {
+    matrix: mat4x4<f32>,
+    position: vec4f,
+}
+
 @group(0) @binding(0)
-var<uniform> camera: mat4x4<f32>;
+var<uniform> camera: Camera;
 
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
-    var pos = camera * vec4f(in.pos + in.inst, 1.0);
+    var pos = camera.matrix * vec4f(in.pos + in.inst, 1.0);
     pos.z *= 1.0009765625;
     return VertexOut(pos);
 }

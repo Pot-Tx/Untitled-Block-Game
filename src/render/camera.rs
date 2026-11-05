@@ -1,27 +1,32 @@
-use crate::actor::{PlayerControlled, Position, Rotation};
+use crate::actor::{Eye, PlayerControlled, Position, Rotation};
 use crate::ecs::*;
 use crate::render::*;
-use crate::util::bounding::Plane;
 use crate::util::transform::Trans4;
 use glam::*;
-use std::f32::consts::FRAC_PI_2;
 use serde::{Deserialize, Serialize};
+use std::f32::consts::FRAC_PI_2;
 use wgpu::*;
 
 /// The camera of the world pass, with the buffer its transform is uploaded to.
 pub struct Camera {
     /// Distances of the near and the far plane of the projection.
-    near: f32,
-    far: f32,
+    pub(crate) near: f32,
+    pub(crate) far: f32,
     /// Vertical field of view, in radians.
-    fov: f32,
+    pub(crate) fov: f32,
 
+    /// The transform of the camera and the position it stands at.
     pub buffer: Buffer,
-    pub transform: BindSet<Transformation>,
-    /// The left, right, top, bottom and far planes of the frustum, used to cull
-    /// regions. The near plane is left out because the camera is always inside
-    /// it.
-    pub frustum: [Plane<Vec3>; 5],
+    pub transform: BindSet<CameraTransform>,
+    /// The matrix that projects world positions into the scene.
+    pub(crate) view_projection: Mat4,
+    /// The position the camera stands at and the direction it looks in, which
+    /// the passes that are not built from its frustum need, such as the ones
+    /// that fit the cascades of the shadow map around the camera.
+    pub eye: Vec3,
+    pub forward: Vec3,
+    pub(crate) right: Vec3,
+    pub(crate) up: Vec3,
 }
 
 impl Resource for Camera {}
@@ -33,7 +38,7 @@ impl Camera {
             canvas,
             &BufferConfig {
                 name: "camera",
-                init: BufferInit::Content(&[Mat4::default()]),
+                init: BufferInit::Content(&[CameraTransform::default()]),
                 usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             },
         );
@@ -44,7 +49,6 @@ impl Camera {
                 content: &buffer,
             },
         );
-
         Self {
             near: 0.125,
             far: 4096.0,
@@ -52,52 +56,44 @@ impl Camera {
 
             buffer,
             transform,
+            view_projection: Mat4::IDENTITY,
 
-            frustum: [Plane::default(); 5],
+            eye: Vec3::ZERO,
+            forward: Vec3::NEG_Z,
+            right: Vec3::X,
+            up: Vec3::Y,
         }
     }
 
-    /// Points the camera at the player and rebuilds the frustum.
+    /// Points the camera at `eye` and records the transform of the frame.
     ///
-    /// The position is interpolated between the last two ticks, so that the
-    /// camera follows the player smoothly between ticks.
-    pub fn transform(
-        &mut self,
-        canvas: &Canvas,
-        pos: &Position,
-        rot: &Rotation,
-        partial_tick: &PartialTick,
-    ) {
-        let pos = pos.prev + (pos.cur - pos.prev) * partial_tick.0;
+    /// The position is interpolated between the last two ticks by the caller,
+    /// so that the camera follows the player smoothly between ticks.
+    pub fn transform(&mut self, canvas: &Canvas, eye: Vec3, rot: &Rotation) {
         let rot = rot.0;
         let aspect = canvas.surface_config.width as f32 / canvas.surface_config.height as f32;
 
-        let trans = Mat4::translation(-pos[0], -pos[1], -pos[2]);
+        let trans = Mat4::translation(-eye[0], -eye[1], -eye[2]);
         let rot = Mat4::rotation(-rot[0], -rot[1], -rot[2]);
         let proj = Mat4::projection(self.near, self.far, self.fov, aspect);
 
         let mat = proj * rot * trans;
+        self.view_projection = mat;
         let queue = &canvas.queue;
-        queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&[mat]));
+        queue.write_buffer(
+            &self.buffer,
+            0,
+            bytemuck::cast_slice(&[CameraTransform {
+                matrix: mat,
+                position: eye.extend(1.0),
+            }]),
+        );
 
-        let dy = self.far * (self.fov / 2.0).tan();
-        let dx = dy * aspect;
         let rot = Mat3::from_mat4(rot).transpose();
-
-        let bl = pos + rot * Vec3::new(dx, -dy, -self.far);
-        let br = pos + rot * Vec3::new(-dx, -dy, -self.far);
-        let tl = pos + rot * Vec3::new(dx, dy, -self.far);
-        let tr = pos + rot * Vec3::new(-dx, dy, -self.far);
-        let back = pos;
-        let orient = pos + rot * Vec3::new(0.0, 0.0, -self.near);
-
-        self.frustum = [
-            Plane::from_points(back, bl, tl, orient),
-            Plane::from_points(back, tr, br, orient),
-            Plane::from_points(back, tl, tr, orient),
-            Plane::from_points(back, br, bl, orient),
-            Plane::from_points(bl, br, tl, orient),
-        ];
+        self.eye = eye;
+        self.right = rot * Vec3::X;
+        self.up = rot * Vec3::Y;
+        self.forward = rot * Vec3::new(0.0, 0.0, -1.0);
     }
 }
 
@@ -247,7 +243,8 @@ impl ViewPort {
     }
 }
 
-/// The bind group of a 4x4 transform matrix.
+/// The bind group of a 4x4 transform matrix, which the viewports are mapped
+/// onto the window with.
 pub struct Transformation;
 
 impl BindSignature for Transformation {
@@ -265,24 +262,69 @@ impl BindSignature for Transformation {
     type Content<'a> = &'a Buffer;
 }
 
+/// The bind group of the world camera: the matrix that projects the world and
+/// the position it is seen from.
+///
+/// The sprites of the world turn towards that position, so that an actor is
+/// drawn from the side the camera is on, and the passes that light the world
+/// read it to tell how far a fragment is from the camera.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+pub struct CameraTransform {
+    pub matrix: Mat4,
+    pub position: Vec4,
+}
+
+impl BindSignature for CameraTransform {
+    const NAME: &'static str = "camera";
+    const LAYOUTS: &'static [BindGroupLayoutEntry] = &[BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::VERTEX_FRAGMENT,
+        ty: BindingType::Buffer {
+            ty: BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    }];
+    type Content<'a> = &'a Buffer;
+}
+
 /// Uploads the transform of the player camera every frame.
 pub(super) struct CameraTransformer;
 
-impl System for CameraTransformer {
-    type CompQuery = (
-        CompRead<PlayerControlled>,
-        CompRead<Position>,
-        CompRead<Rotation>,
+impl System<2> for CameraTransformer {
+    type CompQueries = (
+        (
+            CompRead<PlayerControlled>,
+            CompRead<Position>,
+            CompRead<Rotation>,
+            OptionalRead<Eye>,
+        ),
+        (),
     );
-    type ResQuery = (ResRead<Canvas>, ResWrite<Camera>, ResRead<PartialTick>);
+    type ResQuery = (
+        ResRead<Canvas>,
+        ResWrite<Camera>,
+        ResWrite<Visibility>,
+        ResRead<PartialTick>,
+    );
 
-    fn operate(
+    fn update(
         &mut self,
-        entry: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
-        res.1.transform(res.0, entry.2, entry.3, res.2);
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
+        let (canvas, camera, visibility, partial) = res;
 
-        None
+        for entry in comp.0.iter() {
+            // The camera stands where the player looks from, which is its
+            // position raised to its eyes.
+            let eye = entry.2.interpolated(partial.0) + Vec3::Y * entry.4.map_or(0.0, |eye| eye.0);
+
+            camera.transform(canvas, eye, entry.3);
+            visibility.update(canvas, camera);
+        }
     }
 }

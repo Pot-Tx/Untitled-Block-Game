@@ -1,8 +1,8 @@
 use crate::render::canvas::Canvas;
 use crate::render::vertex::*;
 use crate::render::{BufferInit, BufferVec, QUAD_INDICES};
-use crate::util::coord::*;
 use crate::util::Id;
+use crate::util::coord::*;
 use glam::*;
 use serde::{Deserialize, Serialize};
 use std::array;

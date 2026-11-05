@@ -1,19 +1,25 @@
 [(
     template: "cube_w",
     texture: "dirt",
+    material: "default",
 ), (
     template: "cube_e",
     texture: "dirt",
+    material: "default",
 ), (
     template: "cube_d",
     texture: "dirt",
+    material: "default",
 ), (
     template: "cube_u",
     texture: "dirt",
+    material: "default",
 ), (
     template: "cube_n",
     texture: "dirt",
+    material: "default",
 ), (
     template: "cube_s",
     texture: "dirt",
+    material: "default",
 )]

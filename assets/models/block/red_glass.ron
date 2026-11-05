@@ -1,0 +1,25 @@
+[(
+    template: "cube_w",
+    texture: "red_glass",
+    material: "default",
+), (
+    template: "cube_e",
+    texture: "red_glass",
+    material: "default",
+), (
+    template: "cube_d",
+    texture: "red_glass",
+    material: "default",
+), (
+    template: "cube_u",
+    texture: "red_glass",
+    material: "default",
+), (
+    template: "cube_n",
+    texture: "red_glass",
+    material: "default",
+), (
+    template: "cube_s",
+    texture: "red_glass",
+    material: "default",
+)]

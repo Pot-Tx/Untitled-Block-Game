@@ -36,11 +36,6 @@ pub trait Inst: Copy + Clone + Sync + Send + Pod + Zeroable + Debug {
     fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>>;
 }
 
-/// A vertex without attributes, for geometry that only uses indices.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
-pub struct NoVertex;
-
 /// The position of a vertex, without a normal or texture coordinates.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
@@ -86,33 +81,11 @@ pub struct NormTexVertex {
     pub norm: Vec3,
 }
 
-/// A vertex whose transparency depends on how many neighbours it has.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
-pub struct AlphaVertex {
-    pub pos: Vec3,
-    /// How much of the vertex is occluded by the blocks around it, accumulated
-    /// from its opaque neighbours and used to shade the occlusion mesh.
-    pub alpha: f32,
-}
-
-/// The instance type of batches that draw a single object.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
-pub struct NoInst;
-
 /// An instance that only positions its object.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
 pub struct TransInst {
     pub pos: Vec3,
-}
-
-/// An instance that positions its object at integer coordinates.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable, Serialize, Deserialize)]
-pub struct IntTransInst {
-    pub pos: IVec3,
 }
 
 /// Implements the parts of [`Vertex`] that every format shares.
@@ -391,33 +364,6 @@ impl NormTexVertex {
     }
 }
 
-impl Vertex for AlphaVertex {
-    vertex_basics!(Vec3, 2);
-
-    const LAYOUT: Option<VertexBufferLayout<'static>> = Some(VertexBufferLayout {
-        array_stride: size_of::<Self>() as BufferAddress,
-        step_mode: VertexStepMode::Vertex,
-        attributes: &[
-            VertexAttribute {
-                offset: offset_of!(Self, pos) as BufferAddress,
-                shader_location: 0,
-                format: VertexFormat::Float32x3,
-            },
-            VertexAttribute {
-                offset: offset_of!(Self, alpha) as BufferAddress,
-                shader_location: 1,
-                format: VertexFormat::Float32,
-            },
-        ],
-    });
-
-    #[inline]
-    fn multiply(mut self, scale: <Self::Pos as Coord>::Scalar) -> Self {
-        self.pos *= scale;
-        self
-    }
-}
-
 impl Inst for () {
     fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
         None
@@ -433,20 +379,6 @@ impl Inst for TransInst {
                 offset: offset_of!(Self, pos) as BufferAddress,
                 shader_location: V::ATTRIBUTE_COUNT,
                 format: VertexFormat::Float32x3,
-            }],
-        })
-    }
-}
-
-impl Inst for IntTransInst {
-    fn layout<'a, V: Vertex>() -> Option<VertexBufferLayout<'a>> {
-        Some(VertexBufferLayout {
-            array_stride: size_of::<Self>() as BufferAddress,
-            step_mode: VertexStepMode::Instance,
-            attributes: &[VertexAttribute {
-                offset: offset_of!(Self, pos) as BufferAddress,
-                shader_location: V::ATTRIBUTE_COUNT,
-                format: VertexFormat::Sint32x3,
             }],
         })
     }

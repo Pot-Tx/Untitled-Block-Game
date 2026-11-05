@@ -115,3 +115,4 @@ macro_rules! impl_bind_content {
 impl_bind_content!(R(r), S(s));
 impl_bind_content!(R(r), S(s), T(t));
 impl_bind_content!(R(r), S(s), T(t), U(u));
+impl_bind_content!(R(r), S(s), T(t), U(u), V(v));

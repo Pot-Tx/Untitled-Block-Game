@@ -1,9 +1,11 @@
 use crate::ecs::*;
 use crate::game::client::WINDOW;
 use crate::ui::ActiveScreens;
+use crate::util::OnceInit;
 use crate::util::collection::Registry;
 use glam::Vec2;
 use log::error;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::f32::consts::PI;
 use std::sync::LazyLock;
@@ -13,79 +15,33 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::CursorGrabMode;
 
 /// The actions of the game, in the order of their ids.
-pub(crate) static INPUT_MAP: LazyLock<Registry<Input>> = LazyLock::new(build_input_map);
+pub(crate) static INPUT_MAP: OnceInit<Registry<Input>> = OnceInit::new();
 /// Rotation per pixel of mouse motion, in radians.
 pub(crate) static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 256.0);
 
-/// Builds the input map; the id an action is registered under is the action id
-/// the systems use.
-fn build_input_map() -> Registry<Input> {
-    let mut input_map = Registry::new();
-
-    let escape = Input {
-        button: InputButton::Key(KeyCode::Escape),
-        input_type: InputType::JustPressed,
-    };
-    let forward = Input {
-        button: InputButton::Key(KeyCode::KeyW),
-        input_type: InputType::Pressed,
-    };
-    let left = Input {
-        button: InputButton::Key(KeyCode::KeyA),
-        input_type: InputType::Pressed,
-    };
-    let backward = Input {
-        button: InputButton::Key(KeyCode::KeyS),
-        input_type: InputType::Pressed,
-    };
-    let right = Input {
-        button: InputButton::Key(KeyCode::KeyD),
-        input_type: InputType::Pressed,
-    };
-    let ascend = Input {
-        button: InputButton::Key(KeyCode::Space),
-        input_type: InputType::Pressed,
-    };
-    let descend = Input {
-        button: InputButton::Key(KeyCode::ShiftLeft),
-        input_type: InputType::Pressed,
-    };
-    let attack = Input {
-        button: InputButton::Mouse(MouseButton::Left),
-        input_type: InputType::JustPressed,
-    };
-    let interact = Input {
-        button: InputButton::Mouse(MouseButton::Right),
-        input_type: InputType::JustPressed,
-    };
-
-    input_map.register(0, "return", escape);
-    input_map.register(1, "forward", forward);
-    input_map.register(2, "left", left);
-    input_map.register(3, "backward", backward);
-    input_map.register(4, "right", right);
-    input_map.register(5, "ascend", ascend);
-    input_map.register(6, "descend", descend);
-    input_map.register(7, "attack", attack);
-    input_map.register(8, "interact", interact);
-
-    input_map
+pub(super) fn init_input_map() -> anyhow::Result<()> {
+    let reg = Registry::<Input>::load_ron_from("assets/settings/controls.ron")?;
+    INPUT_MAP.init(reg);
+    Ok(())
 }
 
 /// One action of the game and the input it reacts to.
+#[derive(Serialize, Deserialize)]
 pub struct Input {
     pub button: InputButton,
-    pub input_type: InputType,
+    pub action: InputAction,
 }
 
 /// The key or mouse button an action is bound to.
+#[derive(Serialize, Deserialize)]
 pub enum InputButton {
     Key(KeyCode),
     Mouse(MouseButton),
 }
 
 /// The kind of press an action reacts to.
-pub enum InputType {
+#[derive(Serialize, Deserialize)]
+pub enum InputAction {
     /// The action is present while the button is held down.
     Pressed,
     /// The action is present on the frame the button goes down.
@@ -144,18 +100,18 @@ impl InputState {
         self.mouse_motion[0] += delta.0 as f32;
         self.mouse_motion[1] -= delta.1 as f32;
     }
-    
+
     pub fn push_mouse_scroll(&mut self, delta: MouseScrollDelta) {
         match delta {
             MouseScrollDelta::LineDelta(dx, dy) => {
                 self.mouse_scroll.x += dx;
                 self.mouse_scroll.y += dy;
             }
-            
+
             MouseScrollDelta::PixelDelta(delta) => {
                 self.mouse_scroll.x += delta.x as f32;
                 self.mouse_scroll.y += delta.y as f32;
-            },
+            }
         }
     }
 
@@ -188,16 +144,16 @@ impl InputState {
     #[inline]
     pub fn is_input_present(&self, input: &Input) -> bool {
         match input.button {
-            InputButton::Key(key) => match input.input_type {
-                InputType::Pressed => self.pressed_keys.contains(&key),
-                InputType::JustPressed => self.just_pressed_keys.contains(&key),
-                InputType::JustReleased => self.just_released_keys.contains(&key),
+            InputButton::Key(key) => match input.action {
+                InputAction::Pressed => self.pressed_keys.contains(&key),
+                InputAction::JustPressed => self.just_pressed_keys.contains(&key),
+                InputAction::JustReleased => self.just_released_keys.contains(&key),
             },
 
-            InputButton::Mouse(button) => match input.input_type {
-                InputType::Pressed => self.pressed_buttons.contains(&button),
-                InputType::JustPressed => self.just_pressed_buttons.contains(&button),
-                InputType::JustReleased => self.just_released_buttons.contains(&button),
+            InputButton::Mouse(button) => match input.action {
+                InputAction::Pressed => self.pressed_buttons.contains(&button),
+                InputAction::JustPressed => self.just_pressed_buttons.contains(&button),
+                InputAction::JustReleased => self.just_released_buttons.contains(&button),
             },
         }
     }
@@ -248,15 +204,16 @@ impl CursorApplier {
     }
 }
 
-impl System for CursorApplier {
-    type CompQuery = ();
+impl System<2> for CursorApplier {
+    type CompQueries = ((), ());
     type ResQuery = (ResRead<ActiveScreens>, ResWrite<InputState>);
 
-    fn operate<'a>(
+    fn update(
         &mut self,
-        _: <Self::CompQuery as CompQuery>::Item<'a>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'a>,
-    ) -> Option<Vec<Command>> {
+        _: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
         let wanted = !res.0.menu();
 
         // A menu releases the cursor so that the player can click on it.
@@ -265,7 +222,7 @@ impl System for CursorApplier {
         }
 
         if res.1.cursor_grabbed == self.grabbed {
-            return None;
+            return;
         }
 
         self.grabbed = res.1.cursor_grabbed;
@@ -292,7 +249,5 @@ impl System for CursorApplier {
 
             WINDOW.set_cursor_visible(true);
         }
-
-        None
     }
 }

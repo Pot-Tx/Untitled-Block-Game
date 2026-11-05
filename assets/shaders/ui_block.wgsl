@@ -28,8 +28,14 @@ struct FragmentOut {
 var textures: texture_2d_array<f32>;
 @group(0) @binding(1)
 var texsampler: sampler;
+// The transform of the camera and the position it stands at.
+struct Camera {
+    matrix: mat4x4<f32>,
+    position: vec4f,
+}
+
 @group(1) @binding(0)
-var<uniform> block_camera: mat4x4<f32>;
+var<uniform> block_camera: Camera;
 @group(2) @binding(0)
 var<uniform> viewport: mat4x4<f32>;
 
@@ -37,7 +43,7 @@ var<uniform> viewport: mat4x4<f32>;
 fn vs_main(in: VertexIn) -> VertexOut {
     // The camera projects the block into -1..1 on both axes and keeps the depth
     // of its faces, which is what makes the front faces hide the back ones.
-    let view = block_camera * vec4f(in.pos, 1.0);
+    let view = block_camera.matrix * vec4f(in.pos, 1.0);
 
     // A block is as wide as it is tall, so both axes are scaled by the same
     // factor, which keeps it square and centered in the rectangle.

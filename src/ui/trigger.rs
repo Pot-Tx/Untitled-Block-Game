@@ -3,8 +3,9 @@ use crate::ecs::*;
 use crate::game::InputState;
 use crate::render::{Canvas, Viewports};
 use crate::resources;
-use crate::ui::{ActiveScreens, UiRect, UiSprite, SCREEN_TYPES};
+use crate::ui::{ActiveScreens, SCREEN_TYPES, UiRect, UiSprite};
 use crate::util::Id;
+use glam::Vec4;
 use std::any::TypeId;
 use winit::event::MouseButton;
 
@@ -19,8 +20,9 @@ components! {
 }
 
 impl Triggers {
-    /// Returns whether any of the tagged systems is `S`.
-    pub fn is_for<S: 'static>(&self) -> bool {
+    /// Returns whether `S` is one of the trigger systems of this element.
+    #[inline]
+    pub fn contains<S: 'static>(&self) -> bool {
         self.0.contains(&TypeId::of::<S>())
     }
 }
@@ -35,23 +37,30 @@ resources! {
     pub struct ActiveElement(Option<Id>);
 }
 
+impl ActiveElement {
+    pub(super) fn triggers_for<S: 'static>(&self, triggers: &CompRead<Triggers>) -> bool {
+        self.0
+            .and_then(|id| triggers.get(id))
+            .is_some_and(Triggers::contains::<S>)
+    }
+}
+
 /// Maps the window cursor into the viewports every frame.
 pub(super) struct CursorTracker;
 
-impl System for CursorTracker {
-    type CompQuery = ();
+impl System<2> for CursorTracker {
+    type CompQueries = ((), ());
     type ResQuery = (ResRead<InputState>, ResRead<Canvas>, ResWrite<Viewports>);
 
-    fn operate(
+    fn update(
         &mut self,
-        _: <Self::CompQuery as CompQuery>::Item<'_>,
-        res: &mut <Self::ResQuery as ResQuery>::Item<'_>,
-    ) -> Option<Vec<Command>> {
+        _: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
         let input = res.0;
         res.2
             .track_cursor(res.1, input.cursor_grabbed, input.cursor_pos);
-
-        None
     }
 }
 
@@ -59,33 +68,36 @@ impl System for CursorTracker {
 /// decide whether the pointer lies on one of their elements.
 pub(super) struct UiPointer;
 
-impl System for UiPointer {
-    type CompQuery = CompRead<UiRect>;
-    type ResQuery = (ResRead<ActiveScreens>, ResRead<Viewports>, ResWrite<ActiveElement>);
+impl System<2> for UiPointer {
+    type CompQueries = ((), (CompRead<UiRect>,));
+    type ResQuery = (
+        ResRead<ActiveScreens>,
+        ResRead<Viewports>,
+        ResWrite<ActiveElement>,
+    );
 
     fn update(
         &mut self,
-        comp: Self::CompQuery,
-        res: Self::ResQuery,
-    ) -> Vec<Command> {
-        let (screens, viewports, active) = res.get();
-
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
         // Only the topmost screen receives clicks and hovers, and inside it the
         // last element of the screen is the one in front.
         let mut hit = None;
-        if let Some(top) = screens.top()
-            && let Some(cursor) = viewports.cursor(SCREEN_TYPES.get(top).viewport)
-            && let Some(screen) = screens.get(top)
+        if let Some(top) = res.0.top()
+            && let Some(cursor) = res.1.cursor(SCREEN_TYPES.get(top).viewport)
+            && let Some(screen) = res.0.get(top)
         {
             hit = screen.entities.iter().rev().copied().find(|entity| {
-                comp.get(*entity)
+                comp.1
+                    .0
+                    .get(*entity)
                     .is_some_and(|rect| rect.0.is_point_inside(cursor))
             });
         }
 
-        active.0 = hit;
-
-        Vec::new()
+        res.2.0 = hit;
     }
 }
 
@@ -99,7 +111,7 @@ pub(super) struct Highlighter {
     /// The element whose color is currently scaled, with the color it had
     /// before and the factor that was applied to it, so that the base color can
     /// be restored when the pointer leaves.
-    active: Option<(Id, [f32; 4], f32)>,
+    active: Option<(Id, Vec4, f32)>,
 }
 
 impl Highlighter {
@@ -113,29 +125,35 @@ impl Highlighter {
 
     /// Scales the color channels of `color` by `factor`, keeping its alpha so
     /// that highlighting does not change the transparency of the element.
-    fn tint(color: [f32; 4], factor: f32) -> [f32; 4] {
-        [
+    fn tint(color: Vec4, factor: f32) -> Vec4 {
+        Vec4::new(
             color[0] * factor,
             color[1] * factor,
             color[2] * factor,
             color[3],
-        ]
+        )
     }
 }
 
-impl System for Highlighter {
-    type CompQuery = (CompRead<Triggers>, CompWrite<UiSprite>);
+impl System<2> for Highlighter {
+    type CompQueries = ((), (CompRead<Triggers>, CompWrite<UiSprite>));
     type ResQuery = (ResRead<ActiveElement>, ResRead<InputState>);
 
-    fn update(&mut self, comp: Self::CompQuery, res: Self::ResQuery) -> Vec<Command> {
-        let (pointer, input) = res.get();
+    fn update(
+        &mut self,
+        comp: Self::CompQueries,
+        res: <Self::ResQuery as ResQuery>::Item<'_>,
+        _com: [Commander<'_>; 2],
+    ) {
+        let (triggers, sprites) = comp.1;
+        let (pointer, input) = res;
 
         // The element under the pointer, the factor its color is scaled with
         // and the color the factor applies to. The base color is only read from
         // the sprite when the element changes, so that a change of the factor
         // does not compound on the color that is already tinted.
         let target = pointer.0.and_then(|entity| {
-            if !comp.0.get(entity).is_some_and(Triggers::is_for::<Self>) {
+            if !triggers.get(entity).is_some_and(Triggers::contains::<Self>) {
                 return None;
             }
 
@@ -146,32 +164,30 @@ impl System for Highlighter {
             };
             let base = match self.active {
                 Some((prev, base, _)) if prev == entity => base,
-                _ => comp.1.get(entity)?.color,
+                _ => sprites.get(entity)?.color,
             };
 
             Some((entity, base, factor))
         });
 
         if target == self.active {
-            return Vec::new();
+            return;
         }
 
         // The element that is no longer highlighted shows its own color again.
         if let Some((prev, base, _)) = self.active
-            && let Some(sprite) = comp.1.get(prev)
+            && let Some(sprite) = sprites.get(prev)
         {
             sprite.color = base;
         }
 
         // The element the pointer is on now is scaled with its factor.
         if let Some((entity, base, factor)) = target
-            && let Some(sprite) = comp.1.get(entity)
+            && let Some(sprite) = sprites.get(entity)
         {
             sprite.color = Self::tint(base, factor);
         }
 
         self.active = target;
-
-        Vec::new()
     }
 }

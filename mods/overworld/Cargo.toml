@@ -1,0 +1,15 @@
+[package]
+name = "overworld"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+block-game-abi = { path = "../../crates/abi" }
+block-game-sdk = { path = "../../crates/sdk" }
+glam = "0.34.0"
+noise-functions = "0.8.5"

@@ -1,15 +1,16 @@
+use crate::actor::EntityStore;
+use crate::actor::Session;
 use crate::ecs::*;
 use crate::game::*;
 use crate::render::*;
-use crate::util::coord::{Direction, ICoord3};
 use crate::util::OnceInit;
 use crate::world::*;
 use crossbeam_channel::unbounded;
-use glam::{Vec3, Vec3Swizzles};
+use glam::Vec3;
 use log::error;
-use noise_functions::{CellDistanceSq, Noise, Perlin};
 use rayon::ThreadPoolBuilder;
 use smallvec::smallvec;
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 use std::time::Instant;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, DeviceId, WindowEvent};
@@ -19,23 +20,38 @@ use winit::window::{Window, WindowId};
 /// The window of the game, which only exists once the event loop has resumed.
 pub(crate) static WINDOW: OnceInit<Window> = OnceInit::new();
 
+/// How far around the player the entities of the world are kept in memory, in
+/// regions.
+///
+/// It has to stay inside the finest level of detail, so that a region leaves
+/// the entity scope while it still keeps its own blocks.
+const ENTITY_RADIUS: u8 = 2;
+
 /// The game client: it reacts to the window events and updates the worlds of the
 /// game and of the user interface.
 pub(crate) struct GameClient {
     frame_timer: Instant,
     tick_timer: Instant,
 
-    entities: EntityManager,
-    resources: ResourceManager,
-    tick_systems: SystemManager,
-    frame_systems: SystemManager,
-
+    world_entities: EntityManager,
     ui_entities: EntityManager,
-    ui_systems: SystemManager,
+
+    /// Keeps the identity of the world entities and writes them to their save
+    /// files.
+    store: EntityStore,
+    /// The session the world was loaded from, until its entities are spawned.
+    session: Option<Session>,
+    /// The seed of the world, which the generator and the session share.
+    seed: u64,
+
+    resources: ResourceManager,
+
+    tick_systems: SystemManager<1>,
+    frame_systems: SystemManager<2>,
 }
 
 impl ApplicationHandler for GameClient {
-    /// Creates the window and initialises the client, once.
+    /// Creates the window and initializes the client, once.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if !WINDOW.ready() {
             WINDOW.init(
@@ -95,7 +111,7 @@ impl ApplicationHandler for GameClient {
                     .get_mut::<InputState>()
                     .push_button_event(button, state);
             }
-            
+
             WindowEvent::MouseWheel { delta, .. } => {
                 self.resources
                     .get::<InputState>()
@@ -122,9 +138,12 @@ impl ApplicationHandler for GameClient {
         }
     }
 
-    /// Ticks the simulation, starts a frame and asks the window to redraw.
+    /// Ticks the simulation, saves while paused, starts a frame and asks the
+    /// window to redraw.
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if !self.paused() && self.tick_timer.elapsed() >= *TICK_DURATION {
+        let paused = self.paused();
+
+        if !paused && self.tick_timer.elapsed() >= *TICK_DURATION {
             self.tick_timer = Instant::now();
 
             self.tick();
@@ -133,7 +152,7 @@ impl ApplicationHandler for GameClient {
         if self.frame_timer.elapsed() >= *FRAME_DURATION {
             self.frame_timer = Instant::now();
 
-            if !self.paused() {
+            if !paused {
                 let partial_tick =
                     self.tick_timer.elapsed().as_secs_f32() / TICK_DURATION.as_secs_f32();
                 self.resources
@@ -147,13 +166,15 @@ impl ApplicationHandler for GameClient {
         }
     }
 
-    /// Saves the world before the window closes.
+    /// Saves the world and waits for the pending writes before the window
+    /// closes.
     fn exiting(&mut self, _: &ActiveEventLoop) {
-        self.resources
-            .get::<World>()
-            .unwrap()
-            .get_mut::<World>()
-            .save();
+        let world = self.resources.get::<World>().unwrap().get_mut::<World>();
+        world.flush();
+
+        self.store.flush(&self.world_entities);
+        self.store
+            .write_session(&self.resources, &self.world_entities, self.seed);
     }
 }
 
@@ -170,48 +191,144 @@ impl GameClient {
             frame_timer: Instant::now(),
             tick_timer: Instant::now(),
 
-            entities: EntityManager::new(),
+            world_entities: EntityManager::new(),
+            ui_entities: EntityManager::new(),
+
+            store: EntityStore::new(),
+            session: None,
+            seed: 0,
+
             resources: ResourceManager::new(),
+
             tick_systems: SystemManager::new(),
             frame_systems: SystemManager::new(),
-
-            ui_entities: EntityManager::new(),
-            ui_systems: SystemManager::new(),
         }
     }
 
-    /// Registers the components, the systems, the resources and the data of
-    /// the game, which the window is not needed for.
+    /// Registers the components, the systems and the resources of the game,
+    /// which the window is not needed for.
     ///
-    /// The modules register in the order their data depends on each other: the
-    /// blocks come before the screens, because a screen names the block of an
-    /// element, and the systems come before the screens too, because a screen
-    /// names the systems that handle its triggers. Within a stage the systems
-    /// run in parallel unless their accesses overlap, and a lower stage
-    /// finishes before the next one starts.
+    /// Within a stage the systems run in parallel unless their accesses
+    /// overlap, and a lower stage finishes before the next one starts. The data
+    /// of the modules is loaded by [`Self::init`], once the window exists.
     pub(crate) fn setup(&mut self) {
+        crate::game::register(&mut self.frame_systems, &mut self.resources);
+        // The ticks of the world come before every system that reads them.
+        self.tick_systems.register(0, "ticker", super::Ticker);
+        crate::render::register(&mut self.frame_systems, &mut self.resources);
+        crate::world::register(&mut self.resources);
         crate::actor::register(
-            &mut self.entities,
+            &mut self.world_entities,
             &mut self.tick_systems,
             &mut self.frame_systems,
         );
-        crate::game::register(&mut self.frame_systems, &mut self.resources);
-        crate::render::register(&mut self.frame_systems, &mut self.resources);
-        crate::world::register(&mut self.tick_systems, &mut self.resources);
         crate::ui::register(
             &mut self.ui_entities,
-            &mut self.ui_systems,
+            &mut self.frame_systems,
             &mut self.resources,
         );
 
-        self.register_world();
+        if let Err(e) = crate::game::init_resource_assets(&mut self.resources) {
+            error!("failed to load resource assets: {e}");
+        }
     }
 
     /// Creates the channels, the threads and the resources of the voxel world.
     ///
     /// Temporary: the world and its generator are still described here, until
     /// the mod scripts drive the world data.
-    fn register_world(&mut self) {
+    fn register_world(
+        &mut self,
+        canvas: &Canvas,
+        center: RegionPos,
+        seed: u64,
+    ) -> anyhow::Result<()> {
+        // The color the sky has overhead and the one it holds around the horizon,
+        // which the lights that do not cast a shadow carry. Both follow the sun:
+        // they fade to the color of the night as it sets, and the horizon warms
+        // up where the light of the sun takes a longer way through the
+        // atmosphere.
+        let overhead: fn(u64) -> Vec3 = |tick| {
+            let day = ((tick % 2400) as f32 / 2400.0 * TAU).sin().clamp(0.0, 1.0) * 4.0;
+            let day = day.clamp(0.0, 1.0);
+            let day = day * day * (3.0 - 2.0 * day);
+
+            Vec3::new(0.02, 0.03, 0.06).lerp(Vec3::new(0.35, 0.55, 1.0), day)
+        };
+        let horizon: fn(u64) -> Vec3 = |tick| {
+            let height = ((tick % 2400) as f32 / 2400.0 * TAU).sin().clamp(0.0, 1.0);
+            let day = (height * 4.0).clamp(0.0, 1.0);
+            let day = day * day * (3.0 - 2.0 * day);
+            let sunset = 1.0 - height;
+
+            Vec3::new(0.02, 0.03, 0.06).lerp(Vec3::new(0.75, 0.85, 1.0), day)
+                + Vec3::new(1.0, 0.55, 0.25) * sunset * sunset * 0.25
+        };
+
+        // The sky of the world. The rotation of a light is the `yaw`, `pitch` and
+        // `roll` of the camera of the world turned inside out, and its `z` axis is
+        // the direction it shines from: the sun and the moon turn about the axis of
+        // the day alone, so that they rise in the east and set in the west, and the
+        // moon stands opposite the sun. Both cast the shadow of the world, one
+        // layer of the map each. A day lasts 2400 ticks, which is twenty minutes.
+        //
+        // The strength of the sun and of the moon is the height they stand at,
+        // which is how much of their light reaches level ground: it rises from
+        // zero with a finite slope, so the light of the world changes smoothly
+        // through sunrise and sunset without being crushed for the rest of the
+        // day, and the sun warms up towards the horizon.
+        //
+        // The lights that do not cast a shadow hold the color of the sky: one
+        // overhead and one towards every horizon, which the shader weighs by how
+        // much each surface faces them. Their rotations stand still, and are the
+        // ones that turn the `z` axis of a light onto the axis they light along.
+        let lighting_settings =
+            LightingSettings::load().expect("failed to load the lighting settings");
+
+        let sky = Sky::new(
+            vec![
+                Sun::new(
+                    |tick| Vec3::new(0.0, -((tick % 2400) as f32 / 2400.0 * TAU), -FRAC_PI_2),
+                    |tick| {
+                        let height = ((tick % 2400) as f32 / 2400.0 * TAU).sin().clamp(0.0, 1.0);
+                        let sunset = 1.0 - height;
+
+                        Vec3::new(1.0, 0.98, 0.94).lerp(Vec3::new(1.0, 0.55, 0.25), sunset * sunset)
+                            * height
+                    },
+                    0,
+                ),
+                Sun::new(
+                    |tick| Vec3::new(0.0, PI - ((tick % 2400) as f32 / 2400.0 * TAU), -FRAC_PI_2),
+                    |tick| {
+                        let height = ((tick % 2400) as f32 / 2400.0 * TAU + PI)
+                            .sin()
+                            .clamp(0.0, 1.0);
+
+                        Vec3::new(0.25, 0.35, 0.55) * 0.125 * height
+                    },
+                    0,
+                ),
+            ],
+            vec![
+                Sun::new(|_| Vec3::new(0.0, -FRAC_PI_2, -FRAC_PI_2), overhead, 0),
+                Sun::new(|_| Vec3::new(0.0, FRAC_PI_2, -FRAC_PI_2), horizon, 0),
+                Sun::new(|_| Vec3::new(0.0, 0.0, -FRAC_PI_2), horizon, 0),
+                Sun::new(|_| Vec3::new(0.0, PI, -FRAC_PI_2), horizon, 0),
+                Sun::new(|_| Vec3::ZERO, horizon, 0),
+                Sun::new(|_| Vec3::new(PI, 0.0, 0.0), horizon, 0),
+            ],
+        );
+        let camera = self
+            .resources
+            .get::<Camera>()
+            .expect("the camera is registered before the world")
+            .get::<Camera>();
+        let lighting = Lighting::new(canvas, camera, &sky, lighting_settings);
+
+        self.resources.register("sky", sky);
+        self.resources.register("lighting", lighting);
+
         let (gen_tx, gen_rx) = unbounded();
         let (meshing_tx, meshing_rx) = unbounded();
 
@@ -226,92 +343,36 @@ impl GameClient {
             .build()
             .expect("failed to build thread pool for far regions");
         let world = World::new(
-            RegionPos::ZERO,
+            center,
             // The radius of each level of detail, from the finest level to the
             // coarsest one; further levels such as 13 and 21 are possible, but
             // every one of them costs another ring of regions.
-            smallvec![3, 7],
+            smallvec![3, 7, 15],
+            ENTITY_RADIUS,
             gen_tx,
             meshing_tx,
         );
-        let generator = Generator::new(
-            RegionPos::ZERO,
-            8,
-            Field {
-                climate: |_| -> Vec3 { Vec3::ZERO },
-                // A continental noise blob that is flatter at the top of a hill
-                // than at the bottom of a valley, plus a finer noise for the
-                // details of the surface.
-                density: |pos| -> f32 {
-                    let pos = pos.as_vec3();
+        let registry = ModRegistry::load(&MODS_DIR)?;
+        let world_asset = registry.world_program()?;
+        let program = std::sync::Arc::new(WorldProgram::load(&world_asset, &registry)?);
+        let generator = Generator::new(center, 15, seed, program, gen_rx)?;
 
-                    let h = Perlin::default().frequency(0.015625).sample2(pos.xz()) * 32.0;
-                    let a = 0.125;
-                    let b = 0.0625;
-                    let d1 = (if h > 0.0 {
-                        ((h * a).exp() - 1.0) / a
-                    } else {
-                        (1.0 - (h * -b).exp()) / b
-                    } - pos.y)
-                        * 0.03125;
-
-                    let d2 = Perlin::default().frequency(0.0625).sample3(pos) * 0.75;
-
-                    (d1.tanh() + d2).tanh()
-                },
-                erosion: |pos| -> f32 {
-                    let mut pos = pos.as_vec3();
-                    pos.y *= 2.0;
-
-                    let v1 = CellDistanceSq::default()
-                        .jitter(0.75)
-                        .frequency(0.03125)
-                        .sample3(pos);
-
-                    let v2 = CellDistanceSq::default()
-                        .jitter(1.25)
-                        .frequency(0.03125)
-                        .sample3(pos);
-
-                    let v3 = -(pos.y + 128.0) * 0.00390625;
-
-                    (v1 + v2 + v3).tanh()
-                },
+        self.resources.register(
+            "world_threads",
+            WorldThreads {
+                near: near_threads,
+                far: far_threads,
             },
-            // Turns a sample into a block: solid where the field is dense and not
-            // eroded, dirt just below the surface, and air everywhere else.
-            |sample| -> Meta {
-                if sample.density > 0.0 && sample.erosion < 0.0 {
-                    if sample.density < 0.125
-                        && sample.gradient.y < 0.0
-                        && sample.gradient.xz().length_squared() < 0.00390625
-                    {
-                        2
-                    } else {
-                        1
-                    }
-                } else {
-                    0
-                }
-            },
-            vec![Structure::tree()],
-            // Grass on top of every dirt block that is exposed to the air.
-            |meta, chunk, pos| -> Meta {
-                if meta == 2 && *chunk.get(pos.step(Direction::Up)) == 0 {
-                    3
-                } else {
-                    meta
-                }
-            },
-            gen_rx,
+        );
+        self.resources.register("world", world);
+
+        crate::world::register_updater(
+            &mut self.tick_systems,
+            generator,
+            ChunkMesher::new(meshing_rx),
         );
 
-        self.resources
-            .register("world_threads", WorldThreads(near_threads, far_threads));
-        self.resources.register("world", world);
-        self.resources.register("generator", generator);
-        self.resources
-            .register("chunk_mesher", ChunkMesher::new(meshing_rx));
+        Ok(())
     }
 
     /// Returns whether an open screen pauses the game.
@@ -323,23 +384,30 @@ impl GameClient {
 
     /// Applies the queued commands and runs one step of the simulation.
     fn tick(&mut self) {
-        if let Err(e) = self.entities.flush() {
-            error!("failed to flush commands: {}", e);
-        }
+        self.world_entities.flush();
 
-        match self.tick_systems.update(&self.entities, &self.resources) {
-            Ok(commands) => self.entities.submit(commands),
+        self.tick_systems
+            .update([&self.world_entities], &self.resources);
 
-            Err(e) => error!("failed to tick: {}", e),
-        }
+        // The entities follow the regions the world keeps in memory: the ones
+        // that entered the scope are read back, the ones that left are written
+        // out and dropped.
+        let (entered, left) = self
+            .resources
+            .get::<World>()
+            .unwrap()
+            .get_mut::<World>()
+            .take_entity_scope();
+
+        self.store.load(&entered);
+        self.store.evict(&self.world_entities, &left);
+        self.store.sync(&self.world_entities);
     }
 
     /// Records one frame: the world, the selection, the user interface and the
     /// presentation of the result.
     fn frame(&mut self) {
-        if let Err(e) = self.ui_entities.flush() {
-            error!("failed to flush ui commands: {}", e);
-        }
+        self.ui_entities.flush();
 
         let frame = self
             .resources
@@ -348,22 +416,15 @@ impl GameClient {
             .get::<Canvas>()
             .begin();
         self.resources
-            .get::<Option<Frame>>()
+            .get::<FrameSlot>()
             .unwrap()
-            .get_mut::<Option<Frame>>()
-            .replace(frame);
+            .get_mut::<FrameSlot>()
+            .put(frame);
 
-        match self.frame_systems.update(&self.entities, &self.resources) {
-            Ok(commands) => self.entities.submit(commands),
-
-            Err(e) => error!("failed to render: {}", e),
-        }
-
-        match self.ui_systems.update(&self.ui_entities, &self.resources) {
-            Ok(commands) => self.ui_entities.submit(commands),
-
-            Err(e) => error!("failed to update ui: {}", e),
-        }
+        // The frame stage covers the world and the interface; a system queues
+        // its commands on the entity manager it addresses through its commander.
+        self.frame_systems
+            .update([&self.world_entities, &self.ui_entities], &self.resources);
 
         self.resources
             .get::<InputState>()
@@ -373,9 +434,9 @@ impl GameClient {
 
         if let Some(frame) = self
             .resources
-            .get::<Option<Frame>>()
+            .get::<FrameSlot>()
             .unwrap()
-            .get_mut::<Option<Frame>>()
+            .get_mut::<FrameSlot>()
             .take()
         {
             self.resources
@@ -388,22 +449,59 @@ impl GameClient {
         };
     }
 
-    /// Creates the resources that need a window, registers the renderers and
-    /// starts the first screens.
+    /// Creates the resources that need a window, loads the data that names
+    /// them, registers the renderers and starts the first screens.
+    ///
+    /// The modules load their data in the order it depends on each other: the
+    /// textures of the blocks come before the blocks, which name them, and the
+    /// blocks come before the screens and the actors, which name a block or a
+    /// sprite of them.
     pub(crate) fn init(&mut self) {
         let canvas = pollster::block_on(Canvas::new(&WINDOW));
 
         crate::render::init(&mut self.resources, &canvas);
-        crate::actor::register_canvas(&mut self.frame_systems, &canvas);
-        crate::world::register_canvas(&mut self.resources, &mut self.frame_systems, &canvas);
-        crate::ui::register_canvas(&mut self.ui_systems, &mut self.resources, &canvas);
+        crate::render::register_canvas(&canvas);
+        crate::world::register_canvas(&mut self.frame_systems, &canvas);
+        crate::actor::register_canvas(
+            &mut self.world_entities,
+            &mut self.resources,
+            &mut self.frame_systems,
+            &canvas,
+        );
+        crate::ui::register_canvas(
+            &mut self.ui_entities,
+            &mut self.frame_systems,
+            &mut self.resources,
+            &canvas,
+        );
+
+        // The world is centered on where the player was left, which only the
+        // session knows before a region has been loaded.
+        self.session = self.store.read_session();
+        if let Some(session) = &self.session {
+            session.resources.apply(&mut self.resources);
+        }
+        self.seed = self.session.as_ref().map_or(0, |session| session.seed);
+
+        let center = self
+            .session
+            .as_ref()
+            .and_then(|session| session.player_region(&self.world_entities.components))
+            .unwrap_or(RegionPos::ZERO);
+
+        self.register_world(&canvas, center, self.seed)
+            .expect("failed to initialize the world");
 
         self.resources.register("canvas", canvas);
-        crate::actor::spawn_player(&mut self.entities);
+
+        match self.session.take() {
+            Some(session) => self.store.load_session(&self.world_entities, &session),
+            None => crate::actor::spawn_player(&mut self.world_entities),
+        }
+
         crate::ui::open_initial(&mut self.ui_entities, &self.resources);
 
         self.tick_systems.init();
-        self.ui_systems.init();
         self.frame_systems.init();
     }
 }

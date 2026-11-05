@@ -1,19 +1,25 @@
 [(
     template: "cube_w",
     texture: "bricks",
+    material: "bricks",
 ), (
     template: "cube_e",
     texture: "bricks",
+    material: "bricks",
 ), (
     template: "cube_d",
     texture: "bricks",
+    material: "bricks",
 ), (
     template: "cube_u",
     texture: "bricks",
+    material: "bricks",
 ), (
     template: "cube_n",
     texture: "bricks",
+    material: "bricks",
 ), (
     template: "cube_s",
     texture: "bricks",
+    material: "bricks",
 )]

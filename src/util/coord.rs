@@ -84,8 +84,7 @@ impl Axis {
 impl Direction {
     /// Every direction, ordered so that [`Self::idx`] indexes into this slice.
     ///
-    /// The order matches the six faces of a cuboid produced by
-    /// `Mesh::cuboid` and `BlockModelTemplate::cuboid`.
+    /// The order matches the six faces of a cuboid produced by `Mesh::cuboid`.
     pub const ALL: &'static [Self; 6] = &[
         Self::West,
         Self::East,

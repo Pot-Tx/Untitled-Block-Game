@@ -1,7 +1,11 @@
+use crate::render::canvas::Color;
 use crate::render::*;
 use glam::u32;
-use std::fs;
 use std::marker::PhantomData;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 /// The bind groups a batch is drawn with, in binding order.
 pub trait BatchParam {
@@ -18,22 +22,35 @@ pub trait BatchSignature: 'static {
     fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout>;
 }
 
-/// A render pipeline together with the bind groups it draws with.
-pub struct RenderBatch<S: BatchSignature, V: Vertex, I: Inst> {
+/// A render pipeline together with the bind groups it draws with, built for the
+/// shape of the pass it is begun in.
+pub struct RenderBatch<S: BatchSignature, V: Vertex, I: Inst, C: Color, D: Depth> {
     pub pipeline: RenderPipeline,
     _s_marker: PhantomData<S>,
     _v_marker: PhantomData<V>,
     _i_marker: PhantomData<I>,
+    _c_marker: PhantomData<C>,
+    _d_marker: PhantomData<D>,
 }
 
-/// The name, shader, blend and depth settings of a [`RenderBatch`].
-pub struct RenderBatchConfig<'a> {
+/// The name, shader, pipeline targets and draw state of a [`RenderBatch`].
+pub struct RenderBatchConfig<'a, C: Color, D: Depth> {
     pub name: &'a str,
     /// Name of the shader file to load from `assets/shaders`.
     pub shader: &'a str,
-    /// Whether the batch is alpha blended instead of drawing opaque geometry.
-    pub translucent: bool,
+    /// The formats of the color attachments, in attachment order.
+    pub color_formats: C::Formats,
+    /// The format of the depth attachment, or `None` when the pass has none.
+    pub depth_format: D::Format,
+    /// The face culling mode of the pipeline.
+    pub cull: Option<Face>,
+    /// The blend state of the first color attachment.
+    pub blend: Option<BlendState>,
+    /// The blend state of the second color attachment, when there is one.
+    pub secondary_blend: Option<BlendState>,
     pub topology: PrimitiveTopology,
+    /// Whether the pipeline writes depth. Only read when the pass has a depth
+    /// attachment.
     pub depth_write: bool,
 }
 
@@ -50,14 +67,13 @@ pub struct ComputeBatchConfig<'a> {
     pub shader: &'a str,
 }
 
-impl<S: BatchSignature, V: Vertex, I: Inst> FromConfig<RenderBatchConfig<'_>>
-    for RenderBatch<S, V, I>
+impl<S: BatchSignature, V: Vertex, I: Inst, C: Color, D: Depth>
+    FromConfig<RenderBatchConfig<'_, C, D>> for RenderBatch<S, V, I, C, D>
 {
     type Base = Canvas;
 
-    fn new(base: &Self::Base, config: &RenderBatchConfig) -> Self {
+    fn new(base: &Self::Base, config: &RenderBatchConfig<C, D>) -> Self {
         let device = &base.device;
-        let surface_config = &base.surface_config;
 
         let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
             label: Label::from(format!("{}_pipeline_layout", config.name).as_str()),
@@ -65,33 +81,51 @@ impl<S: BatchSignature, V: Vertex, I: Inst> FromConfig<RenderBatchConfig<'_>>
             immediate_size: 0,
         });
 
-        let shader_src = fs::read_to_string(format!("assets/shaders/{}.wgsl", config.shader))
-            .unwrap_or_else(|_| panic!("failed to read shader file {}.wgsl", config.shader));
+        let shader_src = shader_source(Path::new(&format!("{}.wgsl", config.shader)))
+            .unwrap_or_else(|e| panic!("failed to read shader file {}.wgsl: {e}", config.shader));
         let shader_module = device.create_shader_module(ShaderModuleDescriptor {
             label: Label::from(format!("{}_shader", config.shader).as_str()),
             source: ShaderSource::Wgsl(shader_src.into()),
         });
 
-        let targets = match config.translucent {
-            false => [Some(surface_config.format.into())],
+        // Color pipelines always need a fragment stage. A depth pipeline needs
+        // one only when its depth mode performs a fragment-level test.
+        let color_formats = C::formats(config.color_formats);
+        let targets = (!color_formats.is_empty()).then(|| {
+            color_formats
+                .iter()
+                .enumerate()
+                .map(|(index, &format)| {
+                    Some(ColorTargetState {
+                        format,
+                        blend: match index {
+                            0 => config.blend,
+                            1 => config.secondary_blend,
+                            _ => None,
+                        },
+                        write_mask: ColorWrites::ALL,
+                    })
+                })
+                .collect::<Vec<_>>()
+        });
 
-            true => [Some(ColorTargetState {
-                format: surface_config.format,
-                blend: Some(BlendState {
-                    color: BlendComponent {
-                        src_factor: BlendFactor::SrcAlpha,
-                        dst_factor: BlendFactor::OneMinusSrcAlpha,
-                        operation: BlendOperation::Add,
-                    },
-                    alpha: BlendComponent {
-                        src_factor: BlendFactor::One,
-                        dst_factor: BlendFactor::Zero,
-                        operation: BlendOperation::Add,
-                    },
-                }),
-                write_mask: ColorWrites::ALL,
-            })],
-        };
+        let fragment = (targets.is_some() || D::FRAGMENT).then(|| FragmentState {
+            module: &shader_module,
+            entry_point: Some("fs_main"),
+            compilation_options: PipelineCompilationOptions::default(),
+            targets: targets.as_deref().unwrap_or(&[]),
+        });
+
+        let depth_format = D::format(config.depth_format);
+        let depth_stencil = depth_format.map(|format| DepthStencilState {
+            format,
+            depth_write_enabled: Some(config.depth_write),
+            // Depth is reversed, matching the projection built by
+            // `Trans4::projection`.
+            depth_compare: Some(CompareFunction::Greater),
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        });
 
         let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
             label: Label::from(format!("{}_pipeline", config.name).as_str()),
@@ -102,30 +136,17 @@ impl<S: BatchSignature, V: Vertex, I: Inst> FromConfig<RenderBatchConfig<'_>>
                 buffers: &[V::LAYOUT, I::layout::<V>()],
                 compilation_options: PipelineCompilationOptions::default(),
             },
-            fragment: Some(FragmentState {
-                module: &shader_module,
-                entry_point: Some("fs_main"),
-                compilation_options: PipelineCompilationOptions::default(),
-                targets: &targets,
-            }),
+            fragment,
             primitive: PrimitiveState {
                 topology: config.topology,
                 strip_index_format: None,
                 front_face: FrontFace::Ccw,
-                cull_mode: Some(Face::Back),
+                cull_mode: config.cull,
                 unclipped_depth: false,
                 polygon_mode: PolygonMode::default(),
                 conservative: false,
             },
-            depth_stencil: Some(DepthStencilState {
-                format: TextureFormat::Depth32Float,
-                depth_write_enabled: Some(config.depth_write),
-                // Depth is reversed, matching the projection built by
-                // `Trans4::projection`.
-                depth_compare: Some(CompareFunction::Greater),
-                stencil: StencilState::default(),
-                bias: DepthBiasState::default(),
-            }),
+            depth_stencil,
             multisample: MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -136,12 +157,15 @@ impl<S: BatchSignature, V: Vertex, I: Inst> FromConfig<RenderBatchConfig<'_>>
             _s_marker: PhantomData,
             _v_marker: PhantomData,
             _i_marker: PhantomData,
+            _c_marker: PhantomData,
+            _d_marker: PhantomData,
         }
     }
 }
 
-impl<S: BatchSignature, V: Vertex, I: Inst> RenderBatch<S, V, I> {
-    /// Binds the pipeline of this batch.
+impl<S: BatchSignature, V: Vertex, I: Inst, C: Color, D: Depth> RenderBatch<S, V, I, C, D> {
+    /// Binds the pipeline of this batch, which a pass only accepts when it has
+    /// the shape the batch was built for.
     pub fn begin(&self, pass: &mut RenderPass) {
         pass.set_pipeline(&self.pipeline);
     }
@@ -185,8 +209,8 @@ impl<S: BatchSignature> FromConfig<ComputeBatchConfig<'_>> for ComputeBatch<S> {
             immediate_size: 0,
         });
 
-        let shader_src = fs::read_to_string(format!("assets/shaders/{}.wgsl", config.shader))
-            .unwrap_or_else(|_| panic!("failed to read shader file {}.wgsl", config.shader));
+        let shader_src = shader_source(Path::new(&format!("{}.wgsl", config.shader)))
+            .unwrap_or_else(|e| panic!("failed to read shader file {}.wgsl: {e}", config.shader));
         let shader_module = device.create_shader_module(ShaderModuleDescriptor {
             label: Label::from(format!("{}_shader", config.shader).as_str()),
             source: ShaderSource::Wgsl(shader_src.into()),
@@ -206,6 +230,56 @@ impl<S: BatchSignature> FromConfig<ComputeBatchConfig<'_>> for ComputeBatch<S> {
             _marker: PhantomData,
         }
     }
+}
+
+/// Reads a shader from `assets/shaders`, expanding its includes in place.
+///
+/// Includes are deliberately small: a line of the form
+/// `//#include "name.wgsl"` is replaced by the named file. Paths are relative to
+/// the including shader, and the stack rejects a cycle before it becomes an
+/// unbounded expansion.
+pub(crate) fn shader_source(path: &Path) -> anyhow::Result<String> {
+    let root = Path::new("assets/shaders");
+    let path = root.join(path);
+    let mut stack = Vec::new();
+    read_shader(&path, &mut stack)
+}
+
+fn read_shader(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<String> {
+    let path = path
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("failed to resolve {}: {e}", path.display()))?;
+
+    if stack.contains(&path) {
+        anyhow::bail!("shader include cycle through {}", path.display());
+    }
+
+    stack.push(path.clone());
+    let source = fs::read_to_string(&path)?;
+    let mut expanded = String::with_capacity(source.len());
+
+    for line in source.lines() {
+        if let Some(include) = line.trim().strip_prefix("//#include ") {
+            let name = include
+                .strip_prefix('"')
+                .and_then(|name| name.strip_suffix('"'))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "malformed include in {}: expected //#include \"file.wgsl\"",
+                        path.display()
+                    )
+                })?;
+            let included = path.parent().unwrap_or(Path::new(".")).join(name);
+            expanded.push_str(&read_shader(&included, stack)?);
+        } else {
+            expanded.push_str(line);
+        }
+
+        expanded.push('\n');
+    }
+
+    stack.pop();
+    Ok(expanded)
 }
 
 impl<S: BatchSignature> ComputeBatch<S> {
@@ -237,7 +311,7 @@ impl<S: BindSignature> BatchParam for &BindSet<S> {
 /// A batch whose signature declares a single bind group layout.
 impl<S: BindSignature> BatchSignature for S {
     type Param<'a> = &'a BindSet<S>;
-    
+
     fn layouts(canvas: &Canvas) -> Vec<BindGroupLayout> {
         vec![S::layout(canvas)]
     }

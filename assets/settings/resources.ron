@@ -1,0 +1,6 @@
+// Values that belong to the game and remain the defaults for a new save.
+(
+    resources: [
+        ("gravity", 0.125),
+    ],
+)

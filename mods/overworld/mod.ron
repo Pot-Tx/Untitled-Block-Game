@@ -1,0 +1,7 @@
+(
+    id: "overworld",
+    name: "Overworld",
+    version: "0.1.0",
+    dependencies: [],
+    world: "assets/world/main.ron",
+)

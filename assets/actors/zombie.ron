@@ -1,0 +1,34 @@
+// Temporary: something that walks somewhere, until the generator and the
+// population systems place the actors of the world.
+//
+// It has no goal of its own, because a goal is what a game system hands to an
+// actor while it runs; the debug spawner of the game is what gives it one.
+(
+    components: [
+        ("position", (16.0, 16.0, 16.0)),
+        ("rotation", (0.0, 0.0, 0.0)),
+        ("velocity", (0.0, 0.0, 0.0)),
+        ("speed", (walk: 0.125, jump: 0.75)),
+        ("bound", (min: (-0.25, 0.0, -0.25), max: (0.25, 1.5, 0.25))),
+        ("pathing", (nodes: 512, replan: 20)),
+        ("emission", (
+            offset: (0.0, 2.0, 0.0),
+            direction: (0.0, 0.0, 0.0),
+            color: (0.25, 0.45, 0.8),
+            intensity: 0.75,
+            range: 6.0,
+            inner_cos: 1.0,
+            outer_cos: -1.0,
+        )),
+        ("appearance", [
+            Some((
+                set: "humanoid",
+                frame: "idle_0",
+                size: (1.0, 2.0),
+                offset: (0.0, 0.0, 0.0),
+                uvs: (min: (0.0, 0.0), max: (1.0, 1.0)),
+            )),
+        ]),
+        ("directional_facing", (layers: [0])),
+    ],
+)

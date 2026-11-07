@@ -1,0 +1,110 @@
+(
+    version: 0,
+
+    // The fields a region samples. Every node computes one scalar per sample.
+    grids: [
+        (
+            name: "surface",
+            interval: 8,
+            channels: [
+                ("density", 12),
+                ("erosion", 24),
+                ("openness", 25),
+                ("slope_y", 26),
+                ("slope_xz", 31),
+            ],
+            bias: "openness",
+            nodes: [
+                // The height the surface rises to, in blocks.
+                (op: "perlin", frequency: 0.015625, salt: 1),
+                (op: "constant", value: 32.0),
+                (op: "mul", lhs: 0, rhs: 1),
+                (op: "position", axis: Y),
+                (op: "sub", lhs: 2, rhs: 3),
+                (op: "constant", value: 0.03125),
+                (op: "mul", lhs: 4, rhs: 5),
+                (op: "tanh", source: 6),
+                // The detail the surface breaks up with.
+                (op: "perlin", frequency: 0.0625, salt: 2),
+                (op: "constant", value: 0.75),
+                (op: "mul", lhs: 8, rhs: 9),
+                (op: "add", lhs: 7, rhs: 10),
+                (op: "tanh", source: 11),
+                // The erosion the surface is carved by.
+                (op: "cells", frequency: 0.03125, jitter: 0.75, salt: 3, scale: [1.0, 2.0, 1.0]),
+                (op: "cells", frequency: 0.03125, jitter: 1.25, salt: 4, scale: [1.0, 2.0, 1.0]),
+                (op: "add", lhs: 13, rhs: 14),
+                (op: "position", axis: Y),
+                (op: "constant", value: 2.0),
+                (op: "mul", lhs: 16, rhs: 17),
+                (op: "constant", value: 128.0),
+                (op: "add", lhs: 18, rhs: 19),
+                (op: "constant", value: -0.00390625),
+                (op: "mul", lhs: 20, rhs: 21),
+                (op: "add", lhs: 15, rhs: 22),
+                (op: "tanh", source: 23),
+                (op: "sub", lhs: 12, rhs: 24),
+                // The slope of the density, which tells a surface from rock.
+                (op: "gradient", source: 12, axis: Y),
+                (op: "gradient", source: 12, axis: X),
+                (op: "gradient", source: 12, axis: Z),
+                (op: "mul", lhs: 27, rhs: 27),
+                (op: "mul", lhs: 28, rhs: 28),
+                (op: "add", lhs: 29, rhs: 30),
+            ],
+        ),
+    ],
+
+    // The block of every position of a chunk.
+    terrain: (
+        rule: (
+            when: (lhs: (field: "surface", channel: "density"), op: "gt", rhs: 0.0),
+            then: (
+                when: (lhs: (field: "surface", channel: "erosion"), op: "lt", rhs: 0.0),
+                then: (
+                    when: (all: [
+                        (lhs: (field: "surface", channel: "density"), op: "lt", rhs: 0.125),
+                        (lhs: (field: "surface", channel: "slope_y"), op: "lt", rhs: 0.0),
+                        (lhs: (field: "surface", channel: "slope_xz"), op: "lt", rhs: 0.00390625),
+                    ]),
+                    then: (
+                        when: (
+                            lhs: (field: "surface", channel: "density", at: [0, 1, 0]),
+                            op: "le",
+                            rhs: 0.0,
+                        ),
+                        then: (block: "grass"),
+                        otherwise: (block: "dirt"),
+                    ),
+                    otherwise: (block: "bricks"),
+                ),
+                otherwise: (block: "air"),
+            ),
+            otherwise: (block: "air"),
+        ),
+    ),
+
+    // The structures placed after the terrain, with what a site needs.
+    structures: [
+        (
+            structure: "tree",
+            attempts: 64,
+            gate: (lhs: (field: "surface", channel: "erosion"), op: "lt", rhs: 0.0),
+            condition: (all: [
+                (lhs: (field: "surface", channel: "density"), op: "gt", rhs: 0.0),
+                (lhs: (field: "surface", channel: "erosion"), op: "lt", rhs: 0.0),
+                (lhs: (field: "surface", channel: "density"), op: "lt", rhs: 0.125),
+                (lhs: (field: "surface", channel: "density", at: [0, 3, 0]), op: "le", rhs: 0.0),
+            ]),
+        ),
+        (
+            structure: "camp",
+            attempts: 16,
+            condition: (all: [
+                (lhs: (field: "surface", channel: "density"), op: "gt", rhs: 0.0),
+                (lhs: (field: "surface", channel: "erosion"), op: "lt", rhs: 0.0),
+                (lhs: (field: "surface", channel: "density", at: [0, 2, 0]), op: "le", rhs: 0.0),
+            ]),
+        ),
+    ],
+)

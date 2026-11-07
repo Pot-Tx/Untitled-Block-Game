@@ -14,6 +14,7 @@ pub use trigger::*;
 
 use crate::components;
 use crate::ecs::{EntityManager, ResourceManager, SystemManager};
+use crate::game::ModRegistry;
 use crate::render::{Canvas, Inst, Vertex, Viewports};
 use crate::util::bounding::AABB;
 use crate::world::Block;
@@ -112,9 +113,10 @@ pub(crate) fn register_canvas(
     systems: &mut SystemManager<2>,
     resources: &mut ResourceManager,
     canvas: &Canvas,
+    mods: &ModRegistry,
 ) {
-    if let Err(e) = init_screen_types(&entities.components, systems) {
-        error!("failed to load screen types: {}", e);
+    if let Err(e) = init_screen_types(&entities.components, systems, mods) {
+        error!("failed to load screen types: {e}");
     }
 
     let mut viewports = Viewports::new(canvas, UI_WIDTH, UI_HEIGHT);
@@ -124,10 +126,10 @@ pub(crate) fn register_canvas(
     // The interface is the last pass of a frame: it clears the depth buffer to
     // sort its own elements with it, so a pass drawn after it would be tested
     // against that depth instead of the depth of the world.
-    if let Err(e) = init_ui_textures(canvas) {
+    if let Err(e) = init_ui_textures(canvas, mods) {
         error!("failed to load ui textures: {e}");
     }
-    systems.register(12, "ui_renderer", UiRenderer::new(canvas));
+    systems.register(12, "ui_renderer", UiRenderer::new(canvas, mods));
 }
 
 /// Spawns the screens the game starts with.

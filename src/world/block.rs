@@ -1,3 +1,4 @@
+use crate::game::ModRegistry;
 use crate::id_of;
 use crate::render::{Mesh, NormTexVertex};
 use crate::util::Id;
@@ -17,9 +18,9 @@ pub static BLOCK_TYPES: OnceInit<Registry<BlockType>> = OnceInit::new();
 
 /// Builds the block types, taking the models of the blocks that have one from
 /// [`BLOCK_MODEL_TEMPLATES`](crate::world::model::BLOCK_MODEL_TEMPLATES).
-pub(super) fn init_block_types() -> anyhow::Result<()> {
+pub(super) fn init_block_types(mods: &ModRegistry) -> anyhow::Result<()> {
     let mut block_types = Registry::new();
-    let models = Registry::<BlockModel>::load_rons_from("assets/models/block")?;
+    let models = Registry::<BlockModel>::load_rons(mods, "assets/models/block")?;
 
     let air = BlockType {
         models: vec![BlockModel::empty()],

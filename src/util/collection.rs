@@ -1,15 +1,12 @@
 use crate::game::ASSET_OPTIONS;
+use crate::game::ModRegistry;
 use crate::util::Id;
 use crate::util::bounding::AABB;
-use crate::util::files_in;
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use bimap::BiMap;
 use glam::{U8Vec3, USizeVec3};
 use log::error;
 use serde::de::DeserializeOwned;
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::BufReader;
 use std::mem;
 use std::path::Path;
 
@@ -478,37 +475,22 @@ impl<T> Default for Registry<T> {
 }
 
 impl<T: DeserializeOwned> Registry<T> {
-    /// Loads every file of `path`, numbering the entries by their name, so that
-    /// the id of an entry does not depend on the order the directory lists its
-    /// files in. A file that does not read is reported with its own name, because
-    /// what an entry holds is checked while it is read.
-    pub fn load_rons_from<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+    /// Loads every file of the merged directory `dir`, numbering the entries by
+    /// their name, so that the id of an entry does not depend on the order the
+    /// file system lists its files in. A file that does not read is reported
+    /// with its own name, because what an entry holds is checked while it is
+    /// read.
+    pub fn load_rons(mods: &ModRegistry, dir: &str) -> anyhow::Result<Self> {
         let mut new = Self::new();
 
-        for (id, path) in files_in(path.as_ref())?.into_iter().enumerate() {
-            let name = path
-                .file_stem()
-                .ok_or(anyhow!("failed to get file name"))?
-                .to_string_lossy()
-                .into_owned();
-            let file = File::open(&path)?;
+        for (id, asset) in mods.files(Path::new(dir))?.into_iter().enumerate() {
+            let name = asset.name()?;
+            let bytes = mods.read(&asset)?;
             let item = ASSET_OPTIONS
-                .from_reader(BufReader::new(file))
-                .with_context(|| format!("failed to read {}", path.display()))?;
+                .from_reader(bytes.as_slice())
+                .with_context(|| format!("failed to read {}", asset.display()))?;
 
             new.register(id as Id, name, item);
-        }
-
-        Ok(new)
-    }
-
-    pub fn load_ron_from<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let mut new = Self::new();
-
-        let file = File::open(path)?;
-        let map: HashMap<String, T> = ASSET_OPTIONS.from_reader(file)?;
-        for (i, (name, item)) in map.into_iter().enumerate() {
-            new.register(i as Id, name, item);
         }
 
         Ok(new)

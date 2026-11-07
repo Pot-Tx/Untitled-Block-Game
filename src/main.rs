@@ -2,16 +2,17 @@
 
 use block_game::game::Game;
 use std::panic;
-use winit::error::EventLoopError;
 
-fn main() -> Result<(), EventLoopError> {
+fn main() -> anyhow::Result<()> {
     // Panics are reported through the logging framework.
     env_logger::init();
     panic::set_hook(Box::new(|info| {
         Game::crash(info);
     }));
 
-    let mut game = Game::new();
+    let mut game = Game::new()?;
     game.init();
-    game.run()
+    game.run()?;
+
+    Ok(())
 }

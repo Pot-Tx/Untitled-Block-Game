@@ -33,6 +33,15 @@ impl AssetId {
     pub fn display(&self) -> String {
         format!("{}:{}", self.mod_id, self.path.display())
     }
+
+    /// The name of the file without its extension, which names the entry of a
+    /// registry the file is loaded as.
+    pub fn name(&self) -> anyhow::Result<String> {
+        self.path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .ok_or_else(|| anyhow!("the asset {} has no name", self.display()))
+    }
 }
 
 /// One loaded mod.
@@ -51,9 +60,6 @@ pub struct ModManifest {
     pub version: String,
     #[serde(default)]
     pub dependencies: Vec<ModId>,
-    /// The world program this mod contributes, relative to the mod root.
-    #[serde(default)]
-    pub world: Option<PathBuf>,
 }
 
 impl ModManifest {
@@ -120,6 +126,12 @@ impl ModRegistry {
             {
                 return Err(anyhow!("two mods use the same id"));
             }
+        }
+
+        if !by_id.contains_key(CORE_MOD) {
+            return Err(anyhow!(
+                "no mod with the id {CORE_MOD} provides the content of the game"
+            ));
         }
 
         let order = resolve_order(&by_id)?;
@@ -233,30 +245,6 @@ impl ModRegistry {
         }
 
         Ok(merged.into_values().collect())
-    }
-
-    /// The one world program the loaded mods contribute.
-    pub fn world_program(&self) -> anyhow::Result<AssetId> {
-        let mut programs = Vec::new();
-
-        for package in self.mods() {
-            if let Some(world) = &package.manifest.world {
-                programs.push(AssetId::new(package.manifest.id.clone(), world.clone()));
-            }
-        }
-
-        match programs.len() {
-            1 => Ok(programs.remove(0)),
-            0 => Err(anyhow!("no loaded mod provides a world program")),
-            _ => Err(anyhow!(
-                "more than one mod provides a world program: {}",
-                programs
-                    .iter()
-                    .map(AssetId::display)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )),
-        }
     }
 }
 

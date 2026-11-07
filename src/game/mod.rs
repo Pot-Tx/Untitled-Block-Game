@@ -1,5 +1,6 @@
 //! The game loop -- the event loop handler, the timers and the input map --
-//! and the mod packages the game is loaded from.
+//! the mod packages the game is loaded from, and the world types a world starts
+//! with.
 
 mod client;
 mod input;
@@ -8,22 +9,23 @@ mod modding;
 use crate::ecs::*;
 use crate::game::client::GameClient;
 use crate::resources;
+use anyhow::{Context, anyhow};
 use log::error;
+use rand::Rng;
+use rand::rngs::ThreadRng;
 use ron::Options;
 use ron::extensions::Extensions;
 use serde::{Deserialize, Serialize};
 use std::backtrace::Backtrace;
-use std::fs::File;
-use std::io::BufReader;
 use std::panic;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::Duration;
 use winit::error::EventLoopError;
 use winit::event_loop::{ControlFlow, EventLoop};
 
 pub use input::*;
-pub use modding::{AssetId, Mod, ModId, ModManifest, ModRegistry};
+pub use modding::*;
 
 /// Time between two simulation ticks.
 pub(crate) static TICK_DURATION: LazyLock<Duration> = LazyLock::new(|| Duration::from_millis(50));
@@ -41,7 +43,9 @@ pub static ASSET_OPTIONS: LazyLock<Options> = LazyLock::new(|| {
 /// It is named by `--save <dir>`, or by `--save=<dir>`, on the command line;
 /// `save` is used when the game was started without either of them.
 pub(crate) static SAVE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    arg_dir_of("save", std::env::args().skip(1)).unwrap_or_else(|| PathBuf::from("save"))
+    arg_value("save", std::env::args().skip(1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("save"))
 });
 
 /// The directory the mods are loaded from.
@@ -49,21 +53,23 @@ pub(crate) static SAVE_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
 /// It is named by `--mods <dir>`, or by `--mods=<dir>`, on the command line;
 /// `mods` is used when the game was started without either of them.
 pub(crate) static MODS_DIR: LazyLock<PathBuf> = LazyLock::new(|| {
-    arg_dir_of("mods", std::env::args().skip(1)).unwrap_or_else(|| PathBuf::from("mods"))
+    arg_value("mods", std::env::args().skip(1))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("mods"))
 });
 
-/// The directory `--<name>` names, or `None` when the arguments do not name one.
-fn arg_dir_of(name: &str, mut args: impl Iterator<Item = String>) -> Option<PathBuf> {
+/// The value `--<name>` names, or `None` when the arguments do not name one.
+fn arg_value(name: &str, mut args: impl Iterator<Item = String>) -> Option<String> {
     let joined = format!("--{name}=");
     let separate = format!("--{name}");
 
     while let Some(arg) = args.next() {
-        if let Some(dir) = arg.strip_prefix(joined.as_str()) {
-            return Some(PathBuf::from(dir));
+        if let Some(value) = arg.strip_prefix(joined.as_str()) {
+            return Some(value.to_owned());
         }
 
         if arg == separate {
-            return args.next().map(PathBuf::from);
+            return args.next();
         }
     }
 
@@ -113,23 +119,106 @@ pub(crate) fn register(frame: &mut SystemManager<2>, resources: &mut ResourceMan
     frame.register(0, "cursor_applier", CursorApplier::new());
 }
 
-/// Loads the resource settings that are part of the game instead of a save.
-pub(crate) fn init_resource_assets(resources: &mut ResourceManager) -> anyhow::Result<()> {
-    let file = File::open("assets/settings/resources.ron")?;
-    let raw: RawResources = ASSET_OPTIONS.from_reader(BufReader::new(file))?;
-    resources.read_asset(&raw)
+/// The directory of the world types inside a mod.
+const WORLD_DIR: &str = "assets/worlds";
+
+/// One kind of world, as it is written in `assets/worlds/<name>.ron`.
+///
+/// A world type is the resources a world of that kind starts with: the generator
+/// that shapes it and the values that belong to its content. The values are the
+/// ones the resources declare they can be read from data with, so a world type
+/// names them instead of describing them a second time.
+pub struct WorldType {
+    /// The name of the world type, which is the file it is read from.
+    pub name: String,
+    /// The resources a world of this type starts with.
+    pub resources: RawResources,
+}
+
+impl WorldType {
+    /// Reads the world type `name`.
+    pub fn load(mods: &ModRegistry, name: &str) -> anyhow::Result<Self> {
+        let asset = mods.asset(&Path::new(WORLD_DIR).join(format!("{name}.ron")))?;
+        let resources: RawResources = ASSET_OPTIONS
+            .from_reader(mods.read(&asset)?.as_slice())
+            .with_context(|| format!("failed to read the world type {}", asset.display()))?;
+
+        Ok(Self {
+            name: name.to_owned(),
+            resources,
+        })
+    }
+
+    /// The world type the game starts with: the one named by `world`, or the
+    /// only one the mods provide.
+    pub fn select(mods: &ModRegistry, world: Option<&str>) -> anyhow::Result<Self> {
+        if let Some(name) = world {
+            return Self::load(mods, name);
+        }
+
+        let names = mods
+            .files(Path::new(WORLD_DIR))?
+            .into_iter()
+            .filter_map(|asset| asset.name().ok())
+            .collect::<Vec<_>>();
+
+        match names.len() {
+            1 => Self::load(mods, &names[0]),
+            0 => Err(anyhow!("no loaded mod provides a world type")),
+            _ => Err(anyhow!(
+                "more than one mod provides a world type; name one with --world: {}",
+                names.join(", ")
+            )),
+        }
+    }
+
+    /// Sets the resources of a new world to the values of this world type.
+    pub fn apply(&self, resources: &mut ResourceManager) -> anyhow::Result<()> {
+        resources
+            .read_asset(&self.resources)
+            .with_context(|| format!("in the world type {}", self.name))
+    }
+}
+
+/// Everything the game was started with.
+///
+/// It is used once, when the window opens: the mods are read from, the world type
+/// sets the content of a new world and the seed starts its generator. A world
+/// that was saved replaces the values of the world type and of the seed, so the
+/// running game keeps nothing of them.
+pub(crate) struct Startup {
+    pub mods: ModRegistry,
+    pub world: WorldType,
+    pub seed: u64,
 }
 
 /// The game, which owns the client that drives the event loop.
-#[derive(Default)]
 pub struct Game {
     client: GameClient,
 }
 
 impl Game {
-    /// Creates the game; everything it needs is registered by [`Self::init`].
-    pub fn new() -> Self {
-        Self::default()
+    /// Creates the game, which loads the mods and reads the world it starts with
+    /// from the command line.
+    ///
+    /// `--world <name>` and `--seed <number>` only apply to a world that has no
+    /// session yet: a world that was saved keeps the content it started with.
+    pub fn new() -> anyhow::Result<Self> {
+        let mods = ModRegistry::load(&MODS_DIR)?;
+        // Each argument is looked for on its own pass over the command line, so
+        // that the order of the flags does not matter.
+        let world = arg_value("world", std::env::args().skip(1));
+        let seed = match arg_value("seed", std::env::args().skip(1)) {
+            Some(value) => value
+                .parse::<u64>()
+                .with_context(|| format!("--seed has to be a whole number, not {value}"))?,
+            None => ThreadRng::default().next_u64(),
+        };
+        let world = WorldType::select(&mods, world.as_deref())?;
+
+        Ok(Self {
+            client: GameClient::new(Startup { mods, world, seed }),
+        })
     }
 
     /// Registers the components, the systems, the resources and the data of

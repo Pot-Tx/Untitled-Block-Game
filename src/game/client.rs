@@ -2,12 +2,14 @@ use crate::actor::EntityStore;
 use crate::actor::Session;
 use crate::ecs::*;
 use crate::game::*;
+use crate::generation::*;
 use crate::render::*;
 use crate::util::OnceInit;
 use crate::world::*;
+use anyhow::anyhow;
 use crossbeam_channel::unbounded;
 use glam::Vec3;
-use log::error;
+use log::{error, info};
 use rayon::ThreadPoolBuilder;
 use smallvec::smallvec;
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -20,18 +22,14 @@ use winit::window::{Window, WindowId};
 /// The window of the game, which only exists once the event loop has resumed.
 pub(crate) static WINDOW: OnceInit<Window> = OnceInit::new();
 
-/// How far around the player the entities of the world are kept in memory, in
-/// regions.
-///
-/// It has to stay inside the finest level of detail, so that a region leaves
-/// the entity scope while it still keeps its own blocks.
-const ENTITY_RADIUS: u8 = 2;
-
 /// The game client: it reacts to the window events and updates the worlds of the
 /// game and of the user interface.
 pub(crate) struct GameClient {
     frame_timer: Instant,
     tick_timer: Instant,
+
+    /// The parameters the game was started with, until the world is created.
+    startup: Option<Startup>,
 
     world_entities: EntityManager,
     ui_entities: EntityManager,
@@ -41,8 +39,6 @@ pub(crate) struct GameClient {
     store: EntityStore,
     /// The session the world was loaded from, until its entities are spawned.
     session: Option<Session>,
-    /// The seed of the world, which the generator and the session share.
-    seed: u64,
 
     resources: ResourceManager,
 
@@ -173,30 +169,32 @@ impl ApplicationHandler for GameClient {
         world.flush();
 
         self.store.flush(&self.world_entities);
-        self.store
-            .write_session(&self.resources, &self.world_entities, self.seed);
-    }
-}
 
-impl Default for GameClient {
-    fn default() -> Self {
-        Self::new()
+        let seed = self
+            .resources
+            .get::<Generator>()
+            .map(|generator| generator.get::<Generator>().seed())
+            .unwrap_or(0);
+
+        self.store
+            .write_session(&self.resources, &self.world_entities, seed);
     }
 }
 
 impl GameClient {
-    /// Creates the client; everything it needs is registered by [`Self::setup`].
-    pub(crate) fn new() -> Self {
+    /// Creates the client, which starts the world as `startup` asks.
+    pub(crate) fn new(startup: Startup) -> Self {
         Self {
             frame_timer: Instant::now(),
             tick_timer: Instant::now(),
+
+            startup: Some(startup),
 
             world_entities: EntityManager::new(),
             ui_entities: EntityManager::new(),
 
             store: EntityStore::new(),
             session: None,
-            seed: 0,
 
             resources: ResourceManager::new(),
 
@@ -227,19 +225,13 @@ impl GameClient {
             &mut self.frame_systems,
             &mut self.resources,
         );
-
-        if let Err(e) = crate::game::init_resource_assets(&mut self.resources) {
-            error!("failed to load resource assets: {e}");
-        }
     }
 
     /// Creates the channels, the threads and the resources of the voxel world.
-    ///
-    /// Temporary: the world and its generator are still described here, until
-    /// the mod scripts drive the world data.
     fn register_world(
         &mut self,
         canvas: &Canvas,
+        mods: &ModRegistry,
         center: RegionPos,
         seed: u64,
     ) -> anyhow::Result<()> {
@@ -347,15 +339,13 @@ impl GameClient {
             // The radius of each level of detail, from the finest level to the
             // coarsest one; further levels such as 13 and 21 are possible, but
             // every one of them costs another ring of regions.
-            smallvec![3, 7, 15],
-            ENTITY_RADIUS,
+            smallvec![2, 3],
+            1,
             gen_tx,
             meshing_tx,
         );
-        let registry = ModRegistry::load(&MODS_DIR)?;
-        let world_asset = registry.world_program()?;
-        let program = std::sync::Arc::new(WorldProgram::load(&world_asset, &registry)?);
-        let generator = Generator::new(center, 15, seed, program, gen_rx)?;
+        let mut generator = Generator::new(self.generator_name()?.to_owned());
+        generator.prepare(mods, center, 3, seed, gen_rx)?;
 
         self.resources.register(
             "world_threads",
@@ -365,14 +355,28 @@ impl GameClient {
             },
         );
         self.resources.register("world", world);
+        self.resources.register("generator", generator);
 
-        crate::world::register_updater(
-            &mut self.tick_systems,
-            generator,
-            ChunkMesher::new(meshing_rx),
-        );
+        crate::world::register_updater(&mut self.tick_systems, ChunkMesher::new(meshing_rx));
 
         Ok(())
+    }
+
+    /// The generator the world uses: the one the world type or the save set on
+    /// the generator resource.
+    fn generator_name(&self) -> anyhow::Result<&str> {
+        let generator = self
+            .resources
+            .get::<Generator>()
+            .map_err(|e| anyhow!("the generator resource is missing: {e}"))?
+            .get::<Generator>();
+
+        match generator.name() {
+            "" => Err(anyhow!(
+                "no generator is chosen; name one in the world type or the save"
+            )),
+            name => Ok(name),
+        }
     }
 
     /// Returns whether an open screen pauses the game.
@@ -458,22 +462,37 @@ impl GameClient {
     /// sprite of them.
     pub(crate) fn init(&mut self) {
         let canvas = pollster::block_on(Canvas::new(&WINDOW));
+        let Startup { mods, world, seed } =
+            self.startup.take().expect("the game is initialized once");
 
-        crate::render::init(&mut self.resources, &canvas);
+        crate::render::init(&mut self.resources, &canvas, &mods);
         crate::render::register_canvas(&canvas);
-        crate::world::register_canvas(&mut self.frame_systems, &canvas);
+        crate::world::register_canvas(&mut self.frame_systems, &canvas, &mods);
         crate::actor::register_canvas(
             &mut self.world_entities,
             &mut self.resources,
             &mut self.frame_systems,
             &canvas,
+            &mods,
         );
         crate::ui::register_canvas(
             &mut self.ui_entities,
             &mut self.frame_systems,
             &mut self.resources,
             &canvas,
+            &mods,
         );
+
+        // The scripts and the structures are content of theirs, which a generator
+        // names; the blocks and the actors they reference are built by now.
+        crate::generation::init_structures(&mods);
+
+        // A world begins with the values of its world type. What the session of an
+        // existing world holds replaces them below, so a save keeps the content it
+        // was started with.
+        if let Err(e) = world.apply(&mut self.resources) {
+            panic!("failed to apply the world type {}: {e}", world.name);
+        }
 
         // The world is centered on where the player was left, which only the
         // session knows before a region has been loaded.
@@ -481,7 +500,20 @@ impl GameClient {
         if let Some(session) = &self.session {
             session.resources.apply(&mut self.resources);
         }
-        self.seed = self.session.as_ref().map_or(0, |session| session.seed);
+        let seed = self.session.as_ref().map_or(seed, |session| session.seed);
+        let generator = self.generator_name().unwrap_or("none");
+
+        match &self.session {
+            Some(session) => info!(
+                "the save keeps the world it was started with: seed {}, generator {generator}; \
+                 --world and --seed only apply to a new world",
+                session.seed
+            ),
+            None => info!(
+                "a new world begins: world type {}, generator {generator}, seed {seed}",
+                world.name
+            ),
+        }
 
         let center = self
             .session
@@ -489,7 +521,7 @@ impl GameClient {
             .and_then(|session| session.player_region(&self.world_entities.components))
             .unwrap_or(RegionPos::ZERO);
 
-        self.register_world(&canvas, center, self.seed)
+        self.register_world(&canvas, &mods, center, seed)
             .expect("failed to initialize the world");
 
         self.resources.register("canvas", canvas);

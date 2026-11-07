@@ -5,6 +5,7 @@ mod store;
 
 use crate::components;
 use crate::ecs::*;
+use crate::game::ModRegistry;
 use crate::render::Canvas;
 use crate::util::bounding::AABB;
 use crate::util::collection::Registry;
@@ -76,10 +77,11 @@ pub(crate) fn register_canvas(
     resources: &mut ResourceManager,
     frame: &mut SystemManager<2>,
     canvas: &Canvas,
+    mods: &ModRegistry,
 ) {
-    sprite::init(canvas, frame);
+    sprite::init(canvas, frame, mods);
 
-    ACTOR_TYPES.init(build_actor_types(&entities.components));
+    ACTOR_TYPES.init(build_actor_types(&entities.components, mods));
 
     sprite::register_canvas(resources, frame, canvas);
 
@@ -96,8 +98,8 @@ pub(crate) fn spawn_player(entities: &mut EntityManager) {
 }
 
 /// Builds the actor types of `assets/actors`.
-fn build_actor_types(components: &ComponentManager) -> Registry<EntityDescriptor> {
-    Registry::load_rons_from("assets/actors")
+fn build_actor_types(components: &ComponentManager, mods: &ModRegistry) -> Registry<EntityDescriptor> {
+    Registry::load_rons(mods, "assets/actors")
         .expect("failed to load actor types")
         .map(|raw| {
             EntityDescriptor::from_raw(components, raw)

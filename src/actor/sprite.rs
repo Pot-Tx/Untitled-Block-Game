@@ -12,6 +12,7 @@
 use super::{PlayerControlled, Position, Rotation};
 use crate::components;
 use crate::ecs::*;
+use crate::game::ModRegistry;
 use crate::render::*;
 use crate::resources;
 use crate::util::bounding::AABB;
@@ -210,15 +211,19 @@ impl From<Sprite> for RawSprite<'_> {
 /// animations that drive it, and before the actor types are built, because
 /// their data names an appearance. It needs a canvas, because the frames of a set
 /// are uploaded to the gpu while the set is read.
-pub(super) fn init(canvas: &Canvas, frame: &SystemManager<2>) {
-    if let Err(e) = init_sprite_sets(canvas, frame) {
+pub(super) fn init(canvas: &Canvas, frame: &SystemManager<2>, mods: &ModRegistry) {
+    if let Err(e) = init_sprite_sets(canvas, frame, mods) {
         error!("failed to load sprite sets: {e}");
     }
 }
 
 /// Builds the sets of `assets/sprites` and the frames each of them names.
-fn init_sprite_sets(canvas: &Canvas, frame: &SystemManager<2>) -> anyhow::Result<()> {
-    let raw = Registry::<RawSpriteSet>::load_rons_from("assets/sprites")?;
+fn init_sprite_sets(
+    canvas: &Canvas,
+    frame: &SystemManager<2>,
+    mods: &ModRegistry,
+) -> anyhow::Result<()> {
+    let raw = Registry::<RawSpriteSet>::load_rons(mods, "assets/sprites")?;
     let mut sets = Registry::new();
 
     for id in 0..raw.entries.len() as Id {
@@ -226,7 +231,8 @@ fn init_sprite_sets(canvas: &Canvas, frame: &SystemManager<2>) -> anyhow::Result
         let entry = &raw.entries[id as usize];
         let (frame_handles, _, view) = load_texture_array(
             canvas,
-            format!("assets/textures/actor/{name}"),
+            mods,
+            &format!("assets/textures/actor/{name}"),
             name,
             TextureFormat::Rgba8UnormSrgb,
             true,

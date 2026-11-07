@@ -1,6 +1,6 @@
 use crate::actor::{Inventory, PlayerControlled};
 use crate::ecs::*;
-use crate::game::{INPUT_MAP, InputState, Paused};
+use crate::game::{INPUT_MAP, InputState, ModRegistry, Paused};
 use crate::render::ViewPortAlignment;
 use crate::resources;
 use crate::ui::*;
@@ -54,8 +54,9 @@ pub(crate) struct RawScreen {
 pub(crate) fn init_screen_types(
     components: &ComponentManager,
     systems: &SystemManager<2>,
+    mods: &ModRegistry,
 ) -> anyhow::Result<()> {
-    let reg = Registry::load_rons_from("assets/screens")?;
+    let reg = Registry::load_rons(mods, "assets/screens")?;
     SCREEN_TYPES.init(reg.map(|raw| {
         ScreenType::from_raw(components, systems, raw).expect("failed to create a screen from data")
     }));

@@ -14,6 +14,7 @@ mod vertex;
 mod visibility;
 
 use crate::ecs::{ResourceManager, SystemManager};
+use crate::game::ModRegistry;
 use crate::resources;
 use anyhow::anyhow;
 use bytemuck::{Pod, Zeroable};
@@ -55,8 +56,11 @@ impl BufferVec<u16> {
 }
 
 /// Initialises the globals of the renderer and registers its resources, which
-/// need a window to exist.
-pub(crate) fn init(resources: &mut ResourceManager, canvas: &Canvas) {
+/// need a window to exist. The shaders are content, so they are read from the
+/// mods before the first pipeline is built.
+pub(crate) fn init(resources: &mut ResourceManager, canvas: &Canvas, mods: &ModRegistry) {
+    init_shaders(mods);
+
     EMPTY_BUFFER_VEC.init(BufferVec::empty(canvas));
     QUAD_INDEX_BUFFER_VEC.init(BufferVec::quad_index(canvas));
 

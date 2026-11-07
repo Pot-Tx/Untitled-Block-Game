@@ -288,6 +288,17 @@ pub fn read_file<T: DeserializeOwned>(
         Err(e) => return Err(e.into()),
     };
 
+    decode_file(&bytes, magic, version, path).map(Some)
+}
+
+/// Decodes the document of a file that already has its bytes read, which is
+/// what the assets of a mod go through.
+pub fn decode_file<T: DeserializeOwned>(
+    bytes: &[u8],
+    magic: &[u8; 4],
+    version: u32,
+    path: &Path,
+) -> anyhow::Result<T> {
     if bytes.len() < 8 || &bytes[0..4] != magic {
         return Err(anyhow!("{} is not a save file", path.display()));
     }
@@ -302,7 +313,6 @@ pub fn read_file<T: DeserializeOwned>(
     }
 
     postcard::from_bytes(&bytes[8..])
-        .map(Some)
         .map_err(|e| anyhow!("failed to decode {}: {e}", path.display()))
 }
 

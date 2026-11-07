@@ -65,9 +65,9 @@ pub struct LightingSettings {
 }
 
 impl LightingSettings {
-    /// Reads `assets/settings/lighting.ron`.
+    /// Reads `settings/lighting.ron`.
     pub fn load() -> anyhow::Result<Self> {
-        let file = File::open("assets/settings/lighting.ron")?;
+        let file = File::open("settings/lighting.ron")?;
         let settings: Self = ASSET_OPTIONS.from_reader(BufReader::new(file))?;
         settings.validate()?;
         Ok(settings)

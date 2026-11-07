@@ -4,7 +4,7 @@ use crate::util;
 use crate::util::bounding::AABB;
 use crate::util::collection::Volume;
 use crate::world::block::BlockChunk;
-use crate::world::generation::*;
+use crate::generation::*;
 use crate::world::model::MeshingTask;
 use crate::world::*;
 use anyhow::anyhow;

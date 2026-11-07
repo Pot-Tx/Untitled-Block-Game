@@ -1,0 +1,11 @@
+(
+    // The resources a world of this type starts with. Every resource the game
+    // declares it can be read from data is named here.
+    resources: [
+        // The generator that shapes the world, named by its file of
+        // `assets/generators`.
+        ("generator", "overworld"),
+        // Downwards acceleration applied to every actor that cannot fly.
+        ("gravity", 0.125),
+    ],
+)

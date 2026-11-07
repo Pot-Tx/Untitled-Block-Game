@@ -1,13 +1,17 @@
 use crate::ecs::*;
+use crate::game::ASSET_OPTIONS;
 use crate::game::client::WINDOW;
 use crate::ui::ActiveScreens;
+use crate::util::Id;
 use crate::util::OnceInit;
 use crate::util::collection::Registry;
 use glam::Vec2;
 use log::error;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
+use std::fs::File;
+use std::io::BufReader;
 use std::sync::LazyLock;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta};
@@ -19,8 +23,17 @@ pub(crate) static INPUT_MAP: OnceInit<Registry<Input>> = OnceInit::new();
 /// Rotation per pixel of mouse motion, in radians.
 pub(crate) static MOUSE_SENSITIVITY: LazyLock<f32> = LazyLock::new(|| PI / 256.0);
 
+/// The bindings are the ones of `settings/controls.ron`, which belongs to the
+/// game rather than to a mod, so that a mod cannot take the controls away.
 pub(super) fn init_input_map() -> anyhow::Result<()> {
-    let reg = Registry::<Input>::load_ron_from("assets/settings/controls.ron")?;
+    let file = File::open("settings/controls.ron")?;
+    let map: HashMap<String, Input> = ASSET_OPTIONS.from_reader(BufReader::new(file))?;
+    let mut reg = Registry::new();
+
+    for (id, (name, input)) in map.into_iter().enumerate() {
+        reg.register(id as Id, name, input);
+    }
+
     INPUT_MAP.init(reg);
     Ok(())
 }

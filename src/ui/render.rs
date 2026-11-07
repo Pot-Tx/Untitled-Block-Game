@@ -1,4 +1,5 @@
 use crate::ecs::*;
+use crate::game::ModRegistry;
 use crate::id_of;
 use crate::render::*;
 use crate::ui::*;
@@ -12,6 +13,7 @@ use glyph_brush::ab_glyph::FontArc;
 use glyph_brush::*;
 use log::error;
 use std::collections::HashMap;
+use std::path::Path;
 use wgpu::*;
 
 /// The textures of the interface, drawn as the layers of one array, and the names of the
@@ -22,9 +24,10 @@ static UI_TEXTURES: OnceInit<BindSet<TextureArraySampler>> = OnceInit::new();
 static UI_TEXTURE_HANDLES: OnceInit<Registry<()>> = OnceInit::new();
 
 /// Loads the textures of the interface.
-pub(super) fn init_ui_textures(canvas: &Canvas) -> anyhow::Result<()> {
+pub(super) fn init_ui_textures(canvas: &Canvas, mods: &ModRegistry) -> anyhow::Result<()> {
     let (reg, _, view) = load_texture_array(
         canvas,
+        mods,
         "assets/textures/ui",
         "ui",
         TextureFormat::Rgba8UnormSrgb,
@@ -77,9 +80,14 @@ struct TextAtlas {
 
 impl TextAtlas {
     /// Creates the font, the atlas texture and the glyph brush.
-    fn new(canvas: &Canvas) -> Self {
-        let font = FontArc::try_from_slice(include_bytes!("../../assets/fonts/Pixelspace.ttf"))
-            .expect("failed to load the ui font");
+    fn new(canvas: &Canvas, mods: &ModRegistry) -> Self {
+        let font_asset = mods
+            .asset(Path::new("assets/fonts/Pixelspace.ttf"))
+            .expect("failed to find the ui font");
+        let font = FontArc::try_from_vec(
+            mods.read(&font_asset).expect("failed to read the ui font"),
+        )
+        .expect("failed to load the ui font");
         let texture = Texture::new(
             canvas,
             &TextureConfig {
@@ -448,7 +456,7 @@ impl System<2> for UiRenderer {
 
 impl UiRenderer {
     /// Creates the batches, the buffers and the atlases of the UI.
-    pub fn new(canvas: &Canvas) -> Self {
+    pub fn new(canvas: &Canvas, mods: &ModRegistry) -> Self {
         // Maps the unit square onto the whole window, in normalised device
         // coordinates.
         let full_buffer = Buffer::new(
@@ -550,7 +558,7 @@ impl UiRenderer {
                 .map(|_| BufferVec::instance(canvas, "ui_glyph", BufferInit::Size(0)))
                 .collect(),
             dim: BufferVec::instance(canvas, "ui_dim", BufferInit::Size(0)),
-            text: TextAtlas::new(canvas),
+            text: TextAtlas::new(canvas, mods),
         }
     }
 

@@ -1,11 +1,12 @@
+use crate::game::{AssetId, ModRegistry};
 use crate::render::canvas::Color;
 use crate::render::*;
+use crate::util::OnceInit;
 use glam::u32;
+use log::error;
+use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 /// The bind groups a batch is drawn with, in binding order.
 pub trait BatchParam {
@@ -36,7 +37,8 @@ pub struct RenderBatch<S: BatchSignature, V: Vertex, I: Inst, C: Color, D: Depth
 /// The name, shader, pipeline targets and draw state of a [`RenderBatch`].
 pub struct RenderBatchConfig<'a, C: Color, D: Depth> {
     pub name: &'a str,
-    /// Name of the shader file to load from `assets/shaders`.
+    /// Name of the shader file to load from the merged `assets/shaders`
+    /// directory.
     pub shader: &'a str,
     /// The formats of the color attachments, in attachment order.
     pub color_formats: C::Formats,
@@ -63,7 +65,8 @@ pub struct ComputeBatch<S: BatchSignature> {
 /// The name and shader of a [`ComputeBatch`].
 pub struct ComputeBatchConfig<'a> {
     pub name: &'a str,
-    /// Name of the shader file to load from `assets/shaders`.
+    /// Name of the shader file to load from the merged `assets/shaders`
+    /// directory.
     pub shader: &'a str,
 }
 
@@ -232,30 +235,67 @@ impl<S: BatchSignature> FromConfig<ComputeBatchConfig<'_>> for ComputeBatch<S> {
     }
 }
 
-/// Reads a shader from `assets/shaders`, expanding its includes in place.
+/// The sources of the shaders, expanded when the renderer starts and read by
+/// every pipeline that is built after it.
+static SHADER_SOURCES: OnceInit<HashMap<PathBuf, String>> = OnceInit::new();
+
+/// Reads the shaders of the mods, so that the pipelines have their sources.
 ///
-/// Includes are deliberately small: a line of the form
-/// `//#include "name.wgsl"` is replaced by the named file. Paths are relative to
-/// the including shader, and the stack rejects a cycle before it becomes an
-/// unbounded expansion.
-pub(crate) fn shader_source(path: &Path) -> anyhow::Result<String> {
-    let root = Path::new("assets/shaders");
-    let path = root.join(path);
-    let mut stack = Vec::new();
-    read_shader(&path, &mut stack)
+/// The shaders are content, so a mod may override or add any of them; they are
+/// read once, before the first pipeline is built, because a pipeline needs the
+/// source of its shader.
+pub(crate) fn init_shaders(mods: &ModRegistry) {
+    match load_shaders(mods) {
+        Ok(sources) => SHADER_SOURCES.init(sources),
+        Err(e) => {
+            error!("failed to load the shaders: {e}");
+            SHADER_SOURCES.init(HashMap::new());
+        }
+    }
 }
 
-fn read_shader(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<String> {
-    let path = path
-        .canonicalize()
-        .map_err(|e| anyhow::anyhow!("failed to resolve {}: {e}", path.display()))?;
+fn load_shaders(mods: &ModRegistry) -> anyhow::Result<HashMap<PathBuf, String>> {
+    let mut sources = HashMap::new();
 
-    if stack.contains(&path) {
-        anyhow::bail!("shader include cycle through {}", path.display());
+    for asset in mods.files(Path::new(SHADER_DIR))? {
+        let mut stack = Vec::new();
+        sources.insert(asset.path.clone(), read_shader(mods, &asset, &mut stack)?);
     }
 
-    stack.push(path.clone());
-    let source = fs::read_to_string(&path)?;
+    Ok(sources)
+}
+
+/// The source of the shader `path`, with the includes already expanded.
+pub(crate) fn shader_source(path: &Path) -> anyhow::Result<String> {
+    let path = Path::new(SHADER_DIR).join(path);
+
+    SHADER_SOURCES
+        .get(&path)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no loaded mod provides the shader {}", path.display()))
+}
+
+/// The directory of the shaders inside a mod.
+const SHADER_DIR: &str = "assets/shaders";
+
+/// Reads the shader of `asset` and expands its includes in place.
+///
+/// Includes are deliberately small: a line of the form
+/// `//#include "name.wgsl"` is replaced by the file of that name next to the
+/// including shader. The assets of the mods form one namespace, so a mod
+/// overrides an included file as it overrides any other.
+fn read_shader(
+    mods: &ModRegistry,
+    asset: &AssetId,
+    stack: &mut Vec<AssetId>,
+) -> anyhow::Result<String> {
+    if stack.contains(asset) {
+        anyhow::bail!("shader include cycle through {}", asset.display());
+    }
+
+    stack.push(asset.clone());
+    let source = mods.text(asset)?;
+    let dir = asset.path.parent().unwrap_or(Path::new("."));
     let mut expanded = String::with_capacity(source.len());
 
     for line in source.lines() {
@@ -266,11 +306,11 @@ fn read_shader(path: &Path, stack: &mut Vec<PathBuf>) -> anyhow::Result<String> 
                 .ok_or_else(|| {
                     anyhow::anyhow!(
                         "malformed include in {}: expected //#include \"file.wgsl\"",
-                        path.display()
+                        asset.display()
                     )
                 })?;
-            let included = path.parent().unwrap_or(Path::new(".")).join(name);
-            expanded.push_str(&read_shader(&included, stack)?);
+            let included = mods.asset(&dir.join(name))?;
+            expanded.push_str(&read_shader(mods, &included, stack)?);
         } else {
             expanded.push_str(line);
         }

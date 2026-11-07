@@ -6,14 +6,14 @@
 //! a chunk low.
 
 use crate::game::ASSET_OPTIONS;
+use crate::game::ModRegistry;
 use crate::render::*;
 use crate::util::Id;
 use crate::util::OnceInit;
 use crate::util::collection::Registry;
 use crate::util::coord::{Axis, Coord3, Direction, ICoord3};
-use crate::util::files_in;
 use crate::world::*;
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use bytemuck::{Pod, Zeroable};
 use crossbeam_channel::{Receiver, Sender};
 use glam::{U8Vec3, Vec2, Vec3};
@@ -22,9 +22,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::array;
 use std::collections::HashMap;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::BufReader;
 use std::mem::offset_of;
 use std::path::Path;
 use wgpu::*;
@@ -51,8 +49,8 @@ pub(crate) static OCCLUSION_TEXTURES: OnceInit<BindSet<TextureArraySampler>> = O
 pub(crate) static OCCLUSION_TEXTURE_HANDLES: OnceInit<Registry<()>> = OnceInit::new();
 
 /// Builds the block model templates the block models are built from.
-pub(super) fn init_block_model_templates(canvas: &Canvas) -> anyhow::Result<()> {
-    let (reg, buffer) = load_template_array(canvas, "assets/models/block/templates")?;
+pub(super) fn init_block_model_templates(canvas: &Canvas, mods: &ModRegistry) -> anyhow::Result<()> {
+    let (reg, buffer) = load_template_array(canvas, mods, "assets/models/block/templates")?;
 
     let binding = BindSet::new(
         canvas,
@@ -67,7 +65,7 @@ pub(super) fn init_block_model_templates(canvas: &Canvas) -> anyhow::Result<()> 
     Ok(())
 }
 
-/// Reads the templates of `path` and uploads them as the table the passes that draw
+/// Reads the templates of `dir` and uploads them as the table the passes that draw
 /// blocks read.
 ///
 /// A template is loaded in two halves, like a texture: the face the vertex shaders read
@@ -75,23 +73,20 @@ pub(super) fn init_block_model_templates(canvas: &Canvas) -> anyhow::Result<()> 
 /// it goes into the registry, which stays. A file that holds a face the shaders could not
 /// read the way the mesher draws it fails the load, with the name of the file it came
 /// from.
-pub(super) fn load_template_array<P: AsRef<Path>>(
+pub(super) fn load_template_array(
     canvas: &Canvas,
-    path: P,
+    mods: &ModRegistry,
+    dir: &str,
 ) -> anyhow::Result<(Registry<TemplateProperties>, Buffer)> {
     let mut registry = Registry::new();
     let mut faces = Vec::new();
 
-    for (id, path) in files_in(path.as_ref())?.into_iter().enumerate() {
-        let name = path
-            .file_stem()
-            .ok_or(anyhow!("failed to get file name"))?
-            .to_string_lossy()
-            .into_owned();
-        let file = File::open(&path)?;
+    for (id, asset) in mods.files(Path::new(dir))?.into_iter().enumerate() {
+        let name = asset.name()?;
+        let bytes = mods.read(&asset)?;
         let raw: RawTemplate = ASSET_OPTIONS
-            .from_reader(BufReader::new(file))
-            .with_context(|| format!("failed to read {}", path.display()))?;
+            .from_reader(bytes.as_slice())
+            .with_context(|| format!("failed to read {}", asset.display()))?;
         let (face, properties) = raw
             .halves()
             .with_context(|| format!("in the template {name}"))?;
@@ -113,9 +108,10 @@ pub(super) fn load_template_array<P: AsRef<Path>>(
 }
 
 /// Builds the block textures.
-pub(super) fn init_block_textures(canvas: &Canvas) -> anyhow::Result<()> {
+pub(super) fn init_block_textures(canvas: &Canvas, mods: &ModRegistry) -> anyhow::Result<()> {
     let (color_handles, _, color_view) = load_texture_array(
         canvas,
+        mods,
         "assets/textures/block",
         "block",
         TextureFormat::Rgba8UnormSrgb,
@@ -129,6 +125,7 @@ pub(super) fn init_block_textures(canvas: &Canvas) -> anyhow::Result<()> {
 
     let (material_handles, _, material_view) = load_texture_array(
         canvas,
+        mods,
         "assets/textures/block/material",
         "block_material",
         TextureFormat::Rgba8Unorm,
@@ -220,9 +217,10 @@ impl BindSignature for BlockTextureSet {
 /// block: at a distance one pixel covers many of them, and the levels that
 /// average them away are what keeps the pattern from turning into a moire over
 /// the ground.
-pub(super) fn init_occlusion_textures(canvas: &Canvas) -> anyhow::Result<()> {
+pub(super) fn init_occlusion_textures(canvas: &Canvas, mods: &ModRegistry) -> anyhow::Result<()> {
     let (reg, _, view) = load_texture_array(
         canvas,
+        mods,
         "assets/textures/occlusion",
         "occlusion",
         TextureFormat::Rgba8UnormSrgb,

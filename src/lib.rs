@@ -20,6 +20,7 @@ pub(crate) static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
 pub mod actor;
 pub mod ecs;
 pub mod game;
+pub mod generation;
 pub mod render;
 pub mod ui;
 pub mod util;

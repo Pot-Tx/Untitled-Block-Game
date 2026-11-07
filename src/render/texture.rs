@@ -1,13 +1,11 @@
+use crate::game::ModRegistry;
 use crate::render::*;
 use crate::util::collection::Registry;
-use crate::util::files_in;
 use bytemuck::{Pod, Zeroable};
 use glam::{bool, f32, u8, u32};
 use log::warn;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 use wgpu::wgt::TexelCopyTextureInfo as TexelCopyTextureInfoBase;
 use wgpu::*;
@@ -44,10 +42,8 @@ impl Debug for Tex {
 
 impl Tex {
     /// Decodes a png file into rgba8 pixels.
-    pub fn from_png(mut file: File) -> anyhow::Result<Self> {
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        let image = image::load_from_memory(&bytes)?.into_rgba8();
+    pub fn from_png(bytes: &[u8]) -> anyhow::Result<Self> {
+        let image = image::load_from_memory(bytes)?.into_rgba8();
         let (width, height) = image.dimensions();
         let data = image.into_raw();
 
@@ -104,9 +100,10 @@ impl Tex {
     }
 }
 
-pub fn load_texture_array<P: AsRef<Path>, T>(
+pub fn load_texture_array<T>(
     canvas: &Canvas,
-    path: P,
+    mods: &ModRegistry,
+    dir: &str,
     name: &str,
     format: TextureFormat,
     mipmap: bool,
@@ -115,26 +112,20 @@ pub fn load_texture_array<P: AsRef<Path>, T>(
     let mut registry = Registry::new();
     let mut texs = Vec::new();
 
-    let mut id = 0;
     let mut size = None;
-    for path in files_in(path.as_ref())? {
-        let name = path
-            .file_stem()
-            .ok_or(anyhow!("failed to get file name"))?
-            .to_string_lossy()
-            .into_owned();
-        let file = File::open(path)?;
-        let tex = Tex::from_png(file)?;
+    for (id, asset) in mods.files(Path::new(dir))?.into_iter().enumerate() {
+        let name = asset.name()?;
+        let tex = Tex::from_png(&mods.read(&asset)?)?;
 
-        registry.register(id, &name, f(&tex));
         if size.unwrap_or((tex.width, tex.height)) == (tex.width, tex.height) {
             size = Some((tex.width, tex.height));
+            registry.register(id as u32, name, f(&tex));
             texs.push(Some(tex));
         } else {
+            registry.register(id as u32, name.clone(), f(&tex));
             texs.push(None);
-            warn!("texture {} has an incompatible size", name);
+            warn!("texture {name} of {} has an incompatible size", asset.display());
         }
-        id += 1;
     }
 
     let (texture, texture_view) = create_texture_array(canvas, name, format, mipmap, texs)?;
@@ -162,6 +153,14 @@ pub fn create_texture_array(
         .map(|tex| (tex.width, tex.height))
         .ok_or_else(|| anyhow!("the texture array {} has no layer", name))?;
     let len = texs.len() as u32;
+    let limit = canvas.device.limits().max_texture_array_layers;
+
+    if len > limit {
+        return Err(anyhow!(
+            "the texture array {name} has {len} layers, but the device allows {limit}"
+        ));
+    }
+
     let mip_level_count = match mipmap {
         true => width.min(height).ilog2() + 1,
         false => 1,
